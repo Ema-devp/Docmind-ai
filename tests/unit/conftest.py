@@ -1,0 +1,179 @@
+"""Unit test fixtures for document processing and utilities.
+
+Provides specialized fixtures for unit-level testing with focus on:
+- Image processing utilities
+- File format testing helpers
+- Lightweight mock objects for fast unit tests
+
+Follows 2025 pytest patterns with proper typing and async support.
+"""
+
+import base64
+import io
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+from unittest.mock import Mock, patch
+
+import pytest
+from PIL import Image
+
+from src.config.settings import DocMindSettings
+
+# Rationale: pytest fixture dependency injection intentionally uses argument names
+# that shadow fixture factory functions defined at module scope. Renaming breaks
+# fixture resolution; suppress at module level for tests.
+
+# Import path handling moved to pytest.ini pythonpath configuration
+
+# Note: mock_settings removed - use fixtures from main conftest.py
+# Note: PDF creation moved to use temp_pdf_file from main conftest.py
+
+
+@pytest.fixture
+def sample_image_base64() -> str:
+    """Create a sample base64-encoded image for testing.
+
+    Returns:
+        str: Base64 encoded PNG image for testing image processing.
+    """
+    # Create a small test image
+    img = Image.new("RGB", (10, 10), color="red")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+@pytest.fixture
+def sample_images_data(sample_image_base64: str) -> list[dict[str, Any]]:
+    """Create sample image data for testing."""
+    return [
+        {
+            "image_base64": sample_image_base64,
+            "image_mimetype": "image/png",
+            "image_path": "test_image.png",
+        }
+    ]
+
+
+@pytest.fixture
+def mock_model_manager(mocker) -> Mock:
+    """Create a mock ModelManager instance.
+
+    Returns:
+        Mock: Mock ModelManager for testing model lifecycle.
+    """
+    return mocker.Mock()
+
+
+@pytest.fixture
+def sample_text_file(tmp_path: Path) -> str:
+    """Create a sample text file for testing.
+
+    Returns:
+        str: Path to temporary text file with test content.
+    """
+    text_path = tmp_path / "test.txt"
+    text_path.write_text("This is a test document for loading.")
+    return str(text_path)
+
+
+@pytest.fixture
+def sample_docx_file(tmp_path: Path) -> str:
+    """Create a sample DOCX file for testing.
+
+    Returns:
+        str: Path to minimal DOCX file for format testing.
+    """
+    docx_path = tmp_path / "test.docx"
+    # Create minimal DOCX structure (simplified for testing)
+    docx_path.write_bytes(b"PK\x03\x04" + b"\x00" * 26 + b"sample docx content")
+    return str(docx_path)
+
+
+@pytest.fixture
+def mock_uploaded_file() -> Mock:
+    """Create a mock uploaded file for testing.
+
+    Returns:
+        Mock: Mock uploaded file with standard interface for Streamlit file uploads.
+    """
+    mock_file = Mock()
+    mock_file.name = "test_document.pdf"
+    mock_file.type = "application/pdf"
+    mock_file.getvalue.return_value = b"mock pdf content"
+    return mock_file
+
+
+@pytest.fixture
+def reset_settings_after_test() -> Iterator[None]:
+    """Reset global settings before and after test to avoid pollution."""
+    import importlib
+
+    def _reset_settings() -> None:
+        settings_mod = importlib.import_module("src.config.settings")
+        current = settings_mod.settings
+        if not isinstance(current, settings_mod.DocMindSettings):  # type: ignore[attr-defined]
+            raise TypeError(
+                "src.config.settings.settings was unexpectedly replaced with a "
+                f"{type(current)!r}; expected DocMindSettings"
+            )
+        current.__init__(_env_file=None)  # type: ignore[arg-type]
+        # Clear bootstrap globals so later tests don't inherit dotenv state.
+        settings_mod.reset_bootstrap_state()
+
+    _reset_settings()
+    yield
+    _reset_settings()
+
+
+@pytest.fixture
+def perf_counter_boundary():
+    """Provide a deterministic perf_counter sequence for timing assertions."""
+    seq = [0.0, 0.015, 0.030, 0.045, 0.060, 0.075]
+    with patch("time.perf_counter", side_effect=seq):
+        yield {"sequence": seq}
+
+
+@pytest.fixture
+def integration_settings():
+    """Lightweight DocMindSettings for unit-tier integration checks."""
+    return DocMindSettings(debug=False, log_level="INFO", enable_gpu_acceleration=False)
+
+
+@pytest.fixture
+def mock_llm() -> Mock:
+    """Generic Mock LLM with simple complete/predict methods for unit tests."""
+    llm = Mock()
+    response = Mock()
+    response.text = "Mock LLM response"
+    llm.complete.return_value = response
+    llm.invoke.return_value = "Mock LLM response"
+    llm.predict.return_value = "Mock LLM response"
+    return llm
+
+
+# --- Unit-tier network and logging/system boundaries ---
+
+
+@pytest.fixture(autouse=True)
+def network_guard():
+    """Guard against accidental network calls in unit tests (autouse)."""
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("Network access disabled in unit tests")
+
+    try:
+        import httpx  # type: ignore
+        import requests  # type: ignore
+
+        with (
+            patch.object(requests, "get", _raise),
+            patch.object(requests, "post", _raise),
+            patch.object(httpx, "get", _raise),
+            patch.object(httpx, "post", _raise),
+        ):
+            yield
+    except ImportError:
+        # If libs are not present, do not patch
+        yield

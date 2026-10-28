@@ -1,0 +1,411 @@
+[project]
+name = "docmind_ai_llm"
+version = "2.0.1"
+description = "Local LLM for AI-Powered Document Analysis"
+authors = [{ name = "Bjorn Melin" }]
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.12,<3.14" # Python 3.12-3.13 baseline (ADR-065)
+keywords = ["ai", "rag", "document-analysis", "llm", "hybrid-search"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Application & Configuration (core runtime utilities)
+    "python-dotenv==1.2.2",
+    "loguru>=0.7.3,<1.0.0",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "cryptography>=46.0.7",              # Image encryption at rest (ADR-058)
+    # UI / App Framework
+    "streamlit>=1.52.2,<2.0.0",
+    # Document Processing & NLP
+    "docling>=2.111,<3",                 # Local multiformat document conversion
+    "pypdfium2>=5.7,<6",                 # PDF inspection and rasterization
+    "rapidocr>=3.8,<4",                  # CPU-safe local OCR
+    "onnxruntime>=1.23,<2",              # RapidOCR CPU inference backend
+    "pillow>=12.2.0,<13.0.0",            # Image handling
+    "pyarrow>=24.0.0,<25.0.0",           # Streamlit 1.59.2 requires PyArrow <25
+    "spacy==3.8.14",                     # NLP pipeline (pinned for reproducibility)
+    # ML/LLM Fundamentals
+    "torch==2.11.0",                     # CPU-first ML runtime
+    "transformers>=5.0.0,<6.0.0",        # HF model interfaces (Torch 2.11-compatible)
+    # Local LLM Backends (CPU defaults; GPU in [gpu] extra)
+    "ollama==0.6.2",
+    # Vector Databases & Clients
+    "qdrant-client>=1.15.1,<2.0.0",
+    # LlamaIndex (core + selected integrations)
+    "llama-index-core>=0.14.21,<0.15.0",
+    "llama-index-vector-stores-qdrant>=0.10.0,<0.11.0",
+    "llama-index-storage-kvstore-duckdb>=0.3.0,<0.4.0",
+    "llama-index-llms-openai>=0.7.7,<0.8.0",
+    "llama-index-llms-ollama>=0.9.1,<1.0.0",
+    "llama-index-llms-openai-like>=0.7.2,<0.8.0",
+    "llama-index-embeddings-huggingface>=0.7.0,<0.8.0",
+    "fastembed>=0.5.1",                     # Sparse vectors (BM42) CPU support (FR-005)
+    # Agentic Orchestration
+    "langgraph>=1.0.10,<2.0.0",             # Graph-based orchestration
+    "langgraph-checkpoint-sqlite>=3.0.3,<4.0.0",  # Durable checkpoints (ADR-058)
+    "sqlite-vec>=0.1.6",                    # Semantic search in agentic memory (SPEC-041)
+    "langchain>=1.2.2,<2.0.0",              # Agent factory (create_agent) for LangGraph v1
+    "langchain-core>=1.2.28,<2.0.0",
+    "langchain-openai>=1.1.14,<2.0.0",
+    # Retrieval & Reranking Extras
+    "sentence-transformers>=5.2.0,<6.0.0",  # CrossEncoder reranking
+    "pyyaml>=6.0.3,<7.0.0",                 # YAML parser for prompt templates
+    # Storage (local analytical DB used for cache KV store)
+    # Keep <1.4.0 because llama-index DuckDB integrations currently cap DuckDB <1.4.0.
+    "duckdb>=1.3.2,<1.4.0",
+    # Analytics & Visualization
+    "plotly>=6.7.0,<7.0.0",
+    # Observability
+    "opentelemetry-sdk>=1.41.1,<2.0.0",     # OTEL tracing/metrics SDK
+    "opentelemetry-exporter-otlp-proto-http>=1.41.1,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.41.1,<2.0.0",
+    "portalocker>=3.2.0,<4.0.0",            # Cross-platform snapshot locking
+]
+
+# Optional runtime features published as extras (PEP 621).
+[project.optional-dependencies]
+gpu = [
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    # Dense/image embedding and reranking use PyTorch CUDA. Sparse FastEmbed
+    # remains on the core CPU runtime because fastembed and fastembed-gpu are
+    # mutually exclusive distributions.
+    # spaCy GPU acceleration via CuPy (CUDA 12.x)
+    "cupy-cuda12x>=13.0.0; sys_platform != 'darwin'",
+]
+apple = [
+    # spaCy Apple Silicon acceleration (thinc-apple-ops)
+    "spacy[apple]; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+observability = [
+    "llama-index-observability-otel>=0.6.0,<0.7.0",
+]
+eval = [
+    "beir>=2.0.0,<3.0.0",                # IR benchmark datasets + evaluation
+]
+searchable-pdf = [
+    "ocrmypdf>=17.4,<18",
+]
+# Note: spaCy models are not PyPI packages and must be installed separately:
+# uv run python -m spacy download en_core_web_sm
+
+[project.urls]
+Repository = "https://github.com/BjornMelin/docmind-ai-llm"
+Documentation = "https://github.com/BjornMelin/docmind-ai-llm/tree/main/docs"
+"GPU Setup Guide" = "https://github.com/BjornMelin/docmind-ai-llm/blob/main/docs/developers/gpu-setup.md"
+
+[tool.uv]
+package = false
+# Keep the lock format on uv 0.11 while allowing GitHub's Dependabot updater
+# and newer compatible local/container patch releases.
+required-version = ">=0.11.8,<0.12"
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { extra = "gpu" }]]
+# Transitive dep constraints: keep resolver away from known vulnerable/yanked ranges,
+# while only permitting prereleases when they are explicitly requested or necessary.
+prerelease = "if-necessary-or-explicit"
+constraint-dependencies = [
+    "aiohttp>=3.13.4",
+    "gitpython>=3.1.47,<4.0.0",
+    "langsmith>=0.7.31",
+    "lxml>=6.1.0",
+    "nltk>=3.9.4",
+    "orjson>=3.11.8",
+    "pypdf>=6.10.2,<7.0.0",
+    "python-multipart>=0.0.26",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "gpu" },
+    { index = "pytorch-cpu", group = "cpu" },
+]
+torchvision = [
+    { index = "pytorch-cu128", extra = "gpu" },
+    { index = "pytorch-cpu", group = "cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["opensrc"]
+preview = false
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "N",
+    "S",
+    "B",
+    "A",
+    "C4",
+    "PT",
+    "SIM",
+    "TID",
+    "D",
+    "RUF",
+    "PLE",
+    "PLC",
+    "PLW",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+]
+# Stricter linting with pylint-equivalent rules; keep a short, explicit ignore set.
+ignore = [
+    # Docstring style conflicts
+    "D203",  # 1 blank line required before class docstring (conflicts with D211)
+    "D213",  # Multi-line docstring summary should start at the second line (conflicts with Google style)
+    # Security exceptions (acceptable for this project)
+    "S301",  # serialization usage (acceptable for local session persistence)
+    "S603",  # subprocess call (acceptable for hardware detection)
+    "S607",  # partial executable path (acceptable for well-known system commands)
+    "S108",  # hardcoded temp file path (will be replaced with tempfile)
+    # Pylint-equivalent ignores (matching former .pylintrc)
+    "PLC0415",  # import-outside-toplevel (needed in conditional imports)
+    "PLW1514",  # unspecified-encoding (handled by project defaults)
+    "PLW0603",  # global-statement (acceptable in limited cases)
+    "PLW2901",  # loop variable overwritten (common pattern for line stripping)
+    # Note: PLR is opt-in via explicit PLR091x design rules only.
+]
+# Ensure unused or mistyped noqa comments are flagged and pilot ANN rules.
+extend-select = ["RUF100", "ANN001", "ANN002", "ANN003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",  # assert usage (standard practice in pytest tests)
+    "S311",  # pseudo-random generators (acceptable for test timing simulation)
+    "RUF001", "RUF002", "RUF003",  # allow unicode/emoji in test strings/docstrings
+    "RUF013",  # allow implicit Optional in test annotations for brevity
+    "RUF005",  # list concatenation shortcuts allowed in tests
+    "RUF017",  # performance anti-patterns acceptable in tests
+    "N802",    # test AST visitors use conventional names
+    "B903",  # lightweight helper classes in tests
+    "ANN001", "ANN002", "ANN003",  # pilot annotations off in tests
+    "ANN201", "ANN202", "ANN204",
+    "D100", "D103",  # don't require docstrings in tests
+    "PLC0415",  # import-outside-toplevel in tests
+    "PLC1901",  # empty string checks are fine in tests
+    "PLC2701",  # private imports ok for test coverage
+    "PLW0108",  # inline lambdas ok in monkeypatches
+    "PLW0603",  # global-statement in test fixtures
+    "RUF029",  # async helpers without awaits are ok in tests
+    "S404",  # subprocess usage in tests (e2e helpers)
+]
+"scripts/**/*.py" = [
+    "PLC0415",  # import-outside-toplevel in scripts
+    "S404",  # subprocess usage in scripts
+]
+"scripts/check_coverage.py" = ["RUF001", "RUF002", "RUF003"]
+"docs/**/*.py" = [
+    "RUF001", "RUF002", "RUF003",  # unicode in examples/docstrings
+]
+"src/pages/04_settings.py" = [
+    "PLR0914",  # settings page is intentionally wide to keep UI cohesive
+]
+"tools/eval/run_beir.py" = [
+    "PLC2701",  # private import is intentional for eval script
+    "PLR0914",  # CLI entrypoint is intentionally wide
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+# Match former .pylintrc DESIGN section limits
+max-args = 10
+max-bool-expr = 5
+max-branches = 15
+max-locals = 20
+# Slightly relaxed ceilings for orchestration-style code (CLI entrypoints, Streamlit page glue, scripts/tools)
+# where nested guards and positional arg wiring are sometimes clearer than heavy indirection.
+# For core `src/` logic, prefer extracting helpers and using keyword-only args/config objects; CI runs
+# a stricter pass via `ruff-core.toml` to flag overly positional APIs for refactor.
+max-nested-blocks = 5
+max-positional-args = 10
+max-public-methods = 30
+max-returns = 6
+max-statements = 50
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+    "-ra",
+    "-v",
+    "--import-mode=importlib",
+    "--durations=10",
+    "--durations-min=0.01",
+    "--maxfail=10",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning", 
+    "ignore::UserWarning:torch.*",
+    "ignore::UserWarning:transformers.*",
+    "ignore::FutureWarning:llama_index.*",
+    "ignore::FutureWarning:httpx.*",
+    "ignore:.*asyncio_default_fixture_loop_scope.*:pytest.PytestDeprecationWarning",
+]
+minversion = "9.0.3"
+markers = [
+    "unit: isolated unit tests",
+    "integration: component integration tests",
+    "system: opt-in tests against local services",
+    "e2e: opt-in Streamlit end-to-end tests",
+    "requires_gpu: tests that require a supported GPU runtime",
+    "requires_network: tests that require an explicitly enabled network boundary",
+    "retrieval: focused retrieval behavior tests",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+# Development-only dependency groups (PEP 735); not published as package metadata.
+[dependency-groups]
+cpu = [
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+]
+dev = [
+    "ruff>=0.15.21,<0.16.0",
+    "pyright[nodejs]>=1.1.409,<1.2.0",
+    "pytest>=9.0.3,<10.0.0",
+    "pytest-asyncio>=1.3.0,<2.0.0",
+    "pytest-cov>=7.1.0,<8.0.0",
+    "pytest-mock>=3.14.1",
+    "responses>=0.26.0",
+    "pypdf>=6.10.2,<7.0.0",
+]
+test = [
+    "pytest>=9.0.3,<10.0.0",
+    "pytest-asyncio>=1.3.0,<2.0.0",
+    "pytest-cov>=7.1.0,<8.0.0",
+]
+quality = [
+    "pre-commit>=4.6.0",
+    "coverage[toml]>=7.13.5",
+    "pyright[nodejs]>=1.1.409,<1.2.0",
+    "pytest-xdist>=3.6.0",  # Parallel test execution
+    "pytest-timeout>=2.3.1",  # Test timeout enforcement
+    "pytest-mock>=3.14.0",  # Enhanced mocking support
+]
+
+# Coverage Configuration - Production Ready
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/venv/*",
+    "*/.venv/*",
+    "*/env/*",
+    "setup.py",
+    "conftest.py",
+    ".pytest_cache/*",
+    "htmlcov/*",
+    "dist/*",
+    "build/*",
+    "*.egg-info/*",
+    "qdrant_storage/*",
+    "embeddings_cache/*",
+    "test_logs/*",
+    "cache/*",
+    "logs/*",
+]
+branch = true
+data_file = "coverage/.coverage"
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+    "except ImportError:",
+    "if TYPE_CHECKING:",
+]
+fail_under = 80.0
+precision = 2
+show_missing = true
+skip_covered = false
+sort = "Cover"
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "DocMind AI Test Coverage Report"
+
+[tool.coverage.xml]
+output = "coverage.xml"
+
+[tool.coverage.json]
+output = "coverage.json"
+pretty_print = true
+
+# Pyright Type Checking Configuration - Optimized for Performance
+[tool.pyright]
+include = ["src", "tools"]
+exclude = [
+    "**/__pycache__",
+    ".venv",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".benchmarks",
+    "cache",
+    "data",
+    "docs",
+    "logs",
+    "storage",
+    "templates",
+    "unused",
+    "opensrc",
+    "embeddings_cache",
+    "htmlcov",
+    ".opencode",
+    ".codex",
+    "**/*.egg-info",
+]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = "none"
+# Disable library code analysis for faster type checking
+# Trade-off: Less complete type info for untyped libraries (mitigated by reportMissingTypeStubs = "none")
+useLibraryCodeForTypes = false

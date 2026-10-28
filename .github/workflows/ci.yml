@@ -1,0 +1,459 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-contract:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release-please--') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.11.28'
+          enable-cache: false
+
+      - name: Validate release metadata and lockfile
+        run: |
+          python scripts/check_release_contract.py
+          uv lock --check
+
+  build-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.2
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "bash -c ':> /dev/tcp/127.0.0.1/6333'"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      HF_HUB_OFFLINE: '1'
+      REQUIRE_REAL_LLAMA: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.13'
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.11.28'
+          enable-cache: true
+          cache-suffix: build-test-py312
+
+      - name: Sync canonical environment
+        run: uv sync --group test --extra observability --extra eval --group quality --frozen
+
+      - name: Verify CPU dependency profile
+        run: uv run python -c "import torch; assert torch.version.cuda is None, torch.__version__"
+
+      - name: Quality Gate - Ruff (format+lint)
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+      - name: Quality Gate - Ruff (core limits)
+        run: |
+          uv run ruff check src --config ruff-core.toml
+          echo "::notice::Core lint uses stricter max-positional-args; review core API surfaces periodically."
+
+      - name: Quality Gate - Pyright
+        run: |
+          uv run pyright --threads 4
+
+      - name: Run enabled application E2E suite
+        env:
+          DOCMIND_RUN_E2E: '1'
+        run: uv run pytest tests/e2e -q --no-cov
+
+      - name: Run Qdrant ingest-index-query system smoke
+        env:
+          DOCMIND_QDRANT_SYSTEM_URL: http://127.0.0.1:6333
+          DOCMIND_RUN_SYSTEM: '1'
+        run: uv run pytest tests/system/test_e2e_offline.py -q --no-cov
+
+      - name: Quality Gate - No TODO/FIXME/XXX placeholders
+        run: |
+          if rg -n "\\b(TODO|FIXME|XXX)\\b" src tests docs scripts tools; then
+            echo "Found TODO/FIXME/XXX placeholders. Remove them before merging."
+            exit 1
+          else
+            echo "No TODO/FIXME/XXX placeholders found."
+          fi
+
+      - name: Run unit/integration with coverage
+        run: |
+          uv run pytest tests/unit tests/integration -q \
+            --cov=src \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report=html:htmlcov \
+            --cov-report=xml:coverage.xml \
+            --cov-report=json:coverage.json \
+            --cov-fail-under=80 \
+            --junitxml=junit.xml
+
+      - name: Validate evaluation leaderboard schemas (if present)
+        run: |
+          uv run python scripts/validate_schemas.py
+
+      - name: Upload coverage artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-python-3.12.13
+          path: |
+            htmlcov
+            coverage.xml
+            coverage.json
+            junit.xml
+          if-no-files-found: ignore
+
+  compatibility-python-313:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      HF_HUB_OFFLINE: '1'
+      REQUIRE_REAL_LLAMA: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.12'
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.11.28'
+          enable-cache: true
+          cache-suffix: compatibility-py313
+
+      - name: Sync base environment
+        run: uv sync --frozen
+
+      - name: Verify core-owned GraphRAG dependencies
+        run: |
+          uv run python -c "import importlib.util; assert importlib.util.find_spec('llama_index.core'); assert importlib.util.find_spec('kuzu') is None"
+
+      - name: Run full unit suite
+        run: uv run pytest tests/unit -q --no-cov
+
+      - name: Run focused GraphRAG integrations
+        run: |
+          uv run pytest --no-cov \
+            tests/unit/retrieval/test_graph_rag_factory.py \
+            tests/unit/retrieval/test_router_factory_contract.py \
+            tests/integration/test_graph.py \
+            tests/integration/test_graphrag_exports.py
+
+  qdrant-fusion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.18.2
+        ports:
+          - 6333:6333
+        options: >-
+          --health-cmd "bash -c ':> /dev/tcp/127.0.0.1/6333'"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.13'
+
+      - name: Install uv (with cache)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: '0.11.28'
+          enable-cache: true
+          cache-suffix: qdrant-fusion-py312
+
+      - name: Smoke-test pinned client RRF and DBSF support
+        run: |
+          set -euo pipefail
+          version="$(uv tree --frozen --no-dev --package qdrant-client --depth 0 | sed -n 's/^qdrant-client v//p')"
+          test -n "$version"
+          uv run --no-project --with "qdrant-client==$version" \
+            python scripts/qdrant_fusion_smoke.py
+
+  container-static:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      EXPECTED_PYTHON_VERSION: '3.12.13'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12.13'
+
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Hadolint (errors only)
+        run: |
+          docker run --rm -i hadolint/hadolint:v2.14.0 hadolint --failure-threshold error - < Dockerfile
+
+      - name: Static checks (non-root, no latest, env prefixes)
+        run: |
+          set -euo pipefail
+
+          test -f .dockerignore
+          test -f Dockerfile
+          python - <<'PY'
+          from pathlib import Path
+
+          lines = Path(".dockerignore").read_text(encoding="utf-8-sig").splitlines()
+          normalized = {line.strip() for line in lines}
+          expected = {".env", ".env.*", ".env*"}
+          if not normalized.intersection(expected):
+            raise SystemExit(
+              "Expected at least one .env pattern (.env, .env.*, or .env*) in .dockerignore"
+            )
+          required_inclusions = {
+            "!scripts/container_entrypoint.sh",
+            "!scripts/container_health.py",
+            "!scripts/parser_health.py",
+            "!tools/models/pull.py",
+          }
+          missing = sorted(required_inclusions.difference(normalized))
+          if missing:
+            raise SystemExit(
+              "Dockerfile COPY sources remain ignored: " + ", ".join(missing)
+            )
+          PY
+
+          latest_targets=(Dockerfile docker-compose.yml docker-compose.gpu.yml)
+          if [ -f docker-compose.prod.yml ]; then
+            latest_targets+=(docker-compose.prod.yml)
+          fi
+          if rg -n ':latest([^[:alnum:]_]|$)' "${latest_targets[@]}"; then
+            echo "Do not use ':latest' tags in Docker artifacts."
+            exit 1
+          fi
+
+          python_ver_re="${EXPECTED_PYTHON_VERSION//./[.]}"
+          rg -n "^FROM[[:space:]]+python:${python_ver_re}([[:space:]]|$|@|-)" Dockerfile || { echo "Dockerfile must use python:${EXPECTED_PYTHON_VERSION} base image"; exit 1; }
+
+          python -m pip install --disable-pip-version-check --no-cache-dir dockerfile==3.4.0
+
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          import dockerfile
+
+          dockerfile_path = Path("Dockerfile")
+          if not dockerfile_path.exists():
+            raise SystemExit("Dockerfile not found.")
+
+          try:
+            commands = dockerfile.parse_file(str(dockerfile_path))
+          except Exception as exc:
+            raise SystemExit(f"Failed to parse Dockerfile: {exc}") from exc
+
+          user_directives = [cmd for cmd in commands if cmd.cmd.lower() == "user"]
+          cmd_directives = [cmd for cmd in commands if cmd.cmd.lower() == "cmd"]
+          entrypoint_directives = [cmd for cmd in commands if cmd.cmd.lower() == "entrypoint"]
+
+          def _stringify_value(value) -> str:
+            if isinstance(value, (tuple, list)):
+              return " ".join(value)
+            return str(value)
+
+          if not user_directives:
+            raise SystemExit("Dockerfile must set a non-root USER.")
+          final_user = _stringify_value(user_directives[-1].value)
+          if final_user.lower() in {"root", "0"}:
+            raise SystemExit(f"Dockerfile final USER must be non-root (found: {final_user!r}).")
+
+          def _assert_no_shell_invocation(kind: str, arr: list[str], raw: str) -> None:
+            if len(arr) >= 2:
+              shell_cmd = arr[0].rstrip("/").split("/")[-1]
+              if shell_cmd in ("sh", "bash", "dash", "ash", "ksh") and arr[1] == "-c":
+                raise SystemExit(
+                  f"Dockerfile {kind} must not invoke a shell via {arr[0]} -c: {raw}"
+                )
+            if arr[:2] in (["sh", "-c"], ["bash", "-c"]):
+              raise SystemExit(
+                f"Dockerfile {kind} must not invoke a shell via sh -c / bash -c: {raw}"
+              )
+
+          def _assert_no_embedded_shell(kind: str, arr: list[str], raw: str) -> None:
+            if len(arr) != 1:
+              return
+
+            arg0 = arr[0]
+            if re.search(r"&&|\|\||[|;<>`]", arg0):
+              raise SystemExit(
+                f"Dockerfile {kind} must not embed shell operators in a single string: {raw}"
+              )
+
+            # Catch common mistakes like `CMD ["python -m app"]` while permitting
+            # rare cases like a binary path that legitimately contains spaces.
+            common_bins = ("python", "python3", "uvicorn", "streamlit", "gunicorn", "bash", "sh")
+            if any(arg0.startswith(f"{b} ") for b in common_bins):
+              raise SystemExit(
+                f"Dockerfile {kind} must split arguments into an exec-form array: {raw}"
+              )
+            if re.search(r"\s--?\w", arg0) or re.search(r"\s-[A-Za-z]", arg0):
+              raise SystemExit(
+                f"Dockerfile {kind} must split flags into separate args: {raw}"
+              )
+
+          def _validate_exec_form(kind: str, cmd) -> None:
+            if not cmd.json:
+              raise SystemExit(
+                f"Dockerfile {kind} must use JSON array form (found: {cmd.original})"
+              )
+            arr = list(cmd.value) if isinstance(cmd.value, (tuple, list)) else [str(cmd.value)]
+            raw = cmd.original
+            _assert_no_shell_invocation(kind, arr, raw)
+            _assert_no_embedded_shell(kind, arr, raw)
+
+          if cmd_directives:
+            _validate_exec_form("CMD", cmd_directives[-1])
+
+          if entrypoint_directives:
+            _validate_exec_form("ENTRYPOINT", entrypoint_directives[-1])
+
+          print("Container artifact checks: OK")
+          PY
+
+          # Compose validation and canonical env var naming.
+          docker compose config >/dev/null 2>&1 || { echo "docker compose config failed:"; docker compose config 2>&1; exit 1; }
+          if [ -f docker-compose.prod.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null 2>&1 || { echo "docker compose -f prod config failed:"; docker compose -f docker-compose.yml -f docker-compose.prod.yml config 2>&1; exit 1; }
+            rg -n 'read_only:[[:space:]]*true' docker-compose.prod.yml || { echo "docker-compose.prod.yml must set read_only: true"; exit 1; }
+            rg -n 'tmpfs:' docker-compose.prod.yml || { echo "docker-compose.prod.yml must set tmpfs"; exit 1; }
+            rg -n '/tmp' docker-compose.prod.yml || { echo "docker-compose.prod.yml tmpfs must include /tmp"; exit 1; }
+          fi
+          docker compose -f docker-compose.yml -f docker-compose.gpu.yml config >/dev/null 2>&1 || { echo "docker compose -f gpu config failed:"; docker compose -f docker-compose.yml -f docker-compose.gpu.yml config 2>&1; exit 1; }
+          if [ -f docker-compose.prod.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.gpu.yml config >/dev/null 2>&1 || { echo "docker compose -f prod+gpu config failed:"; docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.gpu.yml config 2>&1; exit 1; }
+          fi
+          compose_files=(docker-compose.yml docker-compose.gpu.yml)
+          if [ -f docker-compose.prod.yml ]; then
+            compose_files+=(docker-compose.prod.yml)
+          fi
+          if rg -n '(^[[:space:]]+OLLAMA_BASE_URL[[:space:]]*:|^[[:space:]]*-[[:space:]]*OLLAMA_BASE_URL[[:space:]]*=)' "${compose_files[@]}"; then
+            echo "Use DOCMIND_OLLAMA_BASE_URL in compose, not OLLAMA_BASE_URL."
+            exit 1
+          fi
+          if rg -n '(^[[:space:]]+VLLM_BASE_URL[[:space:]]*:|^[[:space:]]*-[[:space:]]*VLLM_BASE_URL[[:space:]]*=)' "${compose_files[@]}"; then
+            echo "Use DOCMIND_VLLM__VLLM_BASE_URL in compose, not VLLM_BASE_URL."
+            exit 1
+          fi
+          if rg -n '(^[[:space:]]+LMSTUDIO_BASE_URL[[:space:]]*:|^[[:space:]]*-[[:space:]]*LMSTUDIO_BASE_URL[[:space:]]*=)' "${compose_files[@]}"; then
+            echo "Use DOCMIND_LMSTUDIO_BASE_URL in compose, not LMSTUDIO_BASE_URL."
+            exit 1
+          fi
+
+          echo "Static checks: OK"
+
+  container-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: docmind:ci
+          cache-from: type=gha,scope=docmind-production-image
+          cache-to: type=gha,mode=max,scope=docmind-production-image
+
+      - name: Smoke-test canonical container liveness
+        run: |
+          set -euo pipefail
+          container_name="docmind-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm --force "$container_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run --detach --name "$container_name" docmind:ci >/dev/null
+          for _ in $(seq 1 60); do
+            running="$(docker inspect --format '{{.State.Running}}' "$container_name")"
+            if [ "$running" != "true" ]; then
+              exit_code="$(docker inspect --format '{{.State.ExitCode}}' "$container_name")"
+              docker logs "$container_name"
+              echo "Container PID 1 exited before liveness passed (exit code $exit_code)."
+              exit 1
+            fi
+            status="$(docker inspect --format '{{.State.Health.Status}}' "$container_name")"
+            case "$status" in
+              healthy)
+                exit 0
+                ;;
+              unhealthy)
+                docker logs "$container_name"
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+
+          docker logs "$container_name"
+          echo "Container did not become healthy within 300 seconds."
+          exit 1

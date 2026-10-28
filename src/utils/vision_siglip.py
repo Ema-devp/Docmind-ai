@@ -1,0 +1,137 @@
+"""Shared SigLIP loader utility (library-first, cached).
+
+Provides a single, cached entry point to load a SigLIP model and its processor
+with device selection delegated to utils.core.select_device.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, cast
+
+from src.config.embedding_defaults import (
+    DEFAULT_SIGLIP_MODEL_ID,
+    DEFAULT_SIGLIP_MODEL_REVISION,
+)
+from src.utils.core import select_device
+
+
+def siglip_features(output: Any, *, normalize: bool = True) -> Any:
+    """Return SigLIP feature tensors across Transformers v4 and v5 APIs.
+
+    Transformers v4 returned tensors directly from ``get_*_features``. In
+    Transformers v5 those methods return model output objects with
+    ``pooler_output``. Keeping this normalization local prevents each caller
+    from depending on a specific Transformers major version.
+
+    Args:
+        output: Model output object or tensor returned by SigLIP feature
+            extractors.
+        normalize: Whether to L2-normalize the feature tensor.
+
+    Returns:
+        The SigLIP feature tensor, normalized by default.
+    """
+    features = getattr(output, "pooler_output", output)
+    if isinstance(features, (tuple, list)):
+        if not features:
+            return features
+        features = features[0]
+    if normalize:
+        norm = features.norm(dim=-1, keepdim=True)
+        if hasattr(norm, "clamp_min"):
+            norm = norm.clamp_min(1e-12)
+        else:
+            try:
+                norm = max(float(norm), 1e-12)
+            except (TypeError, ValueError):
+                norm = 1e-12
+        return features / norm
+    return features
+
+
+@lru_cache(maxsize=16)
+def _cached(
+    model_id: str,
+    revision: str | None,
+    cache_folder: str,
+    device: str,
+) -> tuple[Any, Any, str]:
+    from transformers import SiglipModel, SiglipProcessor  # type: ignore
+
+    pretrained_kwargs: dict[str, str | bool] = {
+        "cache_dir": cache_folder,
+        "local_files_only": True,
+    }
+    if revision is not None:
+        pretrained_kwargs["revision"] = revision
+    siglip_model = cast(Any, SiglipModel)
+    siglip_processor = cast(Any, SiglipProcessor)
+    model: Any = siglip_model.from_pretrained(  # nosec B615
+        model_id,
+        **pretrained_kwargs,
+    )
+    if device in {"cuda", "mps"} and hasattr(model, "to"):
+        model = model.to(device)
+    try:
+        processor = siglip_processor.from_pretrained(  # nosec B615
+            model_id,
+            **pretrained_kwargs,
+        )
+    except ImportError:
+        from transformers import (  # type: ignore
+            PreTrainedTokenizerFast,
+            SiglipImageProcessor,
+        )
+
+        image_processor = cast(Any, SiglipImageProcessor).from_pretrained(  # nosec B615
+            model_id,
+            **pretrained_kwargs,
+        )
+        tokenizer = cast(Any, PreTrainedTokenizerFast).from_pretrained(  # nosec B615
+            model_id,
+            **pretrained_kwargs,
+        )
+        processor = siglip_processor(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+        )
+    return model, processor, device
+
+
+def load_siglip(
+    model_id: str | None = None,
+    device: str | None = None,
+    revision: str | None = None,
+    cache_folder: str | Path | None = None,
+) -> tuple[Any, Any, str]:
+    """Load SigLIP model+processor and choose device.
+
+    Args:
+        model_id: Hugging Face model id. Defaults to google/siglip-base-patch16-224.
+        device: Preferred device ("auto"|"cpu"|"cuda"|"mps"). Defaults to auto.
+        revision: Pinned Hugging Face revision for supply-chain stability.
+        cache_folder: Hugging Face cache root. Defaults to the embedding setting.
+
+    Returns:
+        (model, processor, device_str)
+    """
+    resolved_id = model_id or DEFAULT_SIGLIP_MODEL_ID
+    resolved_revision = _resolve_revision(resolved_id, revision)
+    if cache_folder is None:
+        from src.config import settings
+
+        cache_folder = settings.embedding.cache_folder
+    resolved_cache = str(Path(cache_folder).expanduser().resolve())
+    dev = select_device(device or "auto")
+    return _cached(resolved_id, resolved_revision, resolved_cache, dev)
+
+
+def _resolve_revision(model_id: str, revision: str | None) -> str | None:
+    """Resolve the revision pin without applying default pins to custom models."""
+    if isinstance(revision, str):
+        revision = revision.strip() or None
+    if model_id == DEFAULT_SIGLIP_MODEL_ID:
+        return revision or DEFAULT_SIGLIP_MODEL_REVISION
+    return revision

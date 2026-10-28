@@ -1,0 +1,38 @@
+"""Tests for LangGraph pre/post hook resilience in MultiAgentCoordinator.
+
+Ensures hook exceptions are caught and state is annotated rather than crashing.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from src.agents.coordinator import MultiAgentCoordinator
+
+
+def test_pre_post_hooks_resilience(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Verify that hook exceptions do not crash and set observability flags.
+
+    The test monkeypatches the context manager's token estimator to raise in the
+    pre-model hook path and asserts the state is returned with ``hook_error`` and
+    ``hook_name`` set.
+    """
+    coord = MultiAgentCoordinator()
+    pre_hook = coord._create_pre_model_hook()
+    post_hook = coord._create_post_model_hook()
+
+    # Make the context manager raise when estimating tokens
+    def _boom(_messages: list[Any]) -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(coord.context_manager, "estimate_tokens", _boom)
+
+    state = {"messages": ["hello"], "output_mode": "structured"}
+    out_pre = pre_hook(state.copy())
+    assert out_pre.get("hook_error") is True
+    assert out_pre.get("hook_name") == "pre_model_hook"
+
+    # The same failing token boundary is exercised by the post hook.
+    out_post = post_hook(state.copy())
+    assert out_post.get("hook_error") is True
+    assert out_post.get("hook_name") == "post_model_hook"

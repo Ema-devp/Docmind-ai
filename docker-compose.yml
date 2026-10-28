@@ -1,0 +1,75 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: docmind:dev
+    ports:
+      - "8501:8501"
+    environment:
+      DOCMIND_LLM_BACKEND: ollama
+      DOCMIND_LLM_REQUEST__MODEL: "${DOCMIND_LLM_REQUEST__MODEL:-qwen3:4b-instruct}"
+      DOCMIND_OLLAMA_BASE_URL: http://ollama:11434
+      # Compose service hostnames resolve to private RFC1918 addresses; allow explicitly.
+      DOCMIND_SECURITY__ALLOW_REMOTE_ENDPOINTS: "true"
+      DOCMIND_SECURITY__ENDPOINT_ALLOWLIST: '["http://localhost","http://127.0.0.1","https://localhost","https://127.0.0.1","http://ollama"]'
+      DOCMIND_DATABASE__QDRANT_URL: http://qdrant:6333
+    volumes:
+      - docmind_data:/app/data
+      - docmind_cache:/app/cache
+      - docmind_logs:/app/logs
+    depends_on:
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    init: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  ollama:
+    image: ollama/ollama:0.31.2
+    volumes:
+      - ollama:/root/.ollama
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    networks:
+      - backend
+    healthcheck:
+      # Uses bash /dev/tcp since qdrant image omits curl/wget.
+      test: ["CMD", "bash", "-c", ":> /dev/tcp/127.0.0.1/6333 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  frontend:
+  backend:
+    internal: true
+
+volumes:
+  qdrant_storage:
+  ollama:
+  docmind_data:
+  docmind_cache:
+  docmind_logs:

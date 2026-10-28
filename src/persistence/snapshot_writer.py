@@ -1,0 +1,320 @@
+"""Helpers for managing snapshot workspaces and manifest emission."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import mimetypes
+import os
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from loguru import logger
+
+MANIFEST_SCHEMA_VERSION = "2.0"
+MANIFEST_FORMAT_VERSION = "1.0"
+_MANIFEST_FILENAMES = {
+    "manifest.jsonl",
+    "manifest.meta.json",
+    "manifest.checksum",
+}
+
+
+@dataclass(slots=True)
+class SnapshotWorkspace:
+    """Filesystem layout for an in-progress snapshot."""
+
+    root: Path
+
+    @property
+    def graph_dir(self) -> Path:
+        """Directory for persisted property graph data."""
+        return self.root / "graph"
+
+
+__all__ = [
+    "MANIFEST_FORMAT_VERSION",
+    "MANIFEST_SCHEMA_VERSION",
+    "SnapshotWorkspace",
+    "hash_manifest",
+    "iter_payload_files",
+    "load_manifest_entries",
+    "mark_manifest_complete",
+    "start_workspace",
+    "write_manifest",
+]
+
+
+def start_workspace(base_dir: Path) -> SnapshotWorkspace:
+    """Create a temporary workspace rooted at ``base_dir``.
+
+    Args:
+        base_dir: Parent directory that houses all snapshot versions.
+
+    Returns:
+        SnapshotWorkspace: Descriptor for the created workspace.
+    """
+    base_dir.mkdir(parents=True, exist_ok=True)
+    workspace = base_dir / f"_tmp-{uuid4().hex}"
+    workspace.mkdir(parents=True, exist_ok=False)
+    (workspace / "graph").mkdir(parents=True, exist_ok=True)
+    logger.debug("Created snapshot workspace {}", workspace.name)
+    return SnapshotWorkspace(workspace)
+
+
+def iter_payload_files(workspace_path: Path) -> Iterator[Path]:
+    """Yield manifest payload files contained within ``workspace_path``."""
+    for path in workspace_path.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in _MANIFEST_FILENAMES:
+            continue
+        yield path
+
+
+def write_manifest(workspace_path: Path, manifest_meta: dict[str, Any]) -> None:
+    """Write manifest artifacts (JSONL + meta + checksum) for a workspace.
+
+    Args:
+        workspace_path: Workspace directory containing payload files.
+        manifest_meta: Metadata describing the snapshot (versions, hashes, etc.).
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If a payload is unsupported or metadata is not strict JSON.
+    """
+    _fsync_payload_tree(workspace_path)
+    entries: list[dict[str, Any]] = []
+    for payload in sorted(iter_payload_files(workspace_path)):
+        relative = payload.relative_to(workspace_path).as_posix()
+        entries.append(
+            {
+                "path": relative,
+                "sha256": _sha256(payload),
+                "size_bytes": payload.stat().st_size,
+                "content_type": _guess_content_type(payload),
+            }
+        )
+
+    meta_payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "persist_format_version": MANIFEST_FORMAT_VERSION,
+        "complete": False,
+    }
+    meta_payload.update(manifest_meta)
+    meta_payload.setdefault("created_at", datetime.now(UTC).isoformat())
+    try:
+        manifest_sha256 = hash_manifest(entries, meta_payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Snapshot manifest must use strict JSON values") from exc
+
+    manifest_path = workspace_path / "manifest.jsonl"
+    serialized_lines = (
+        json.dumps(
+            entry,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        for entry in entries
+    )
+    serialized = "\n".join(serialized_lines)
+    if serialized:
+        serialized += "\n"
+    _write_text_atomic(manifest_path, serialized)
+
+    meta_path = workspace_path / "manifest.meta.json"
+    _write_json_atomic(meta_path, meta_payload)
+
+    checksum_payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "manifest_sha256": manifest_sha256,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    checksum_path = workspace_path / "manifest.checksum"
+    _write_json_atomic(checksum_path, checksum_payload)
+    _fsync_dir(workspace_path)
+
+
+def mark_manifest_complete(snapshot_dir: Path) -> None:
+    """Mark manifest metadata as complete and refresh checksum.
+
+    Args:
+        snapshot_dir: Snapshot directory containing the incomplete manifest.
+
+    Returns:
+        None.
+
+    Raises:
+        FileNotFoundError: If manifest metadata is missing.
+        ValueError: If manifest artifacts are unreadable or not strict JSON.
+    """
+    meta_path = snapshot_dir / "manifest.meta.json"
+    if not meta_path.is_file() or meta_path.is_symlink():
+        raise FileNotFoundError("Snapshot manifest metadata is missing")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Snapshot manifest metadata is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Snapshot manifest metadata must be a JSON object")
+    if payload.get("complete") is True:
+        return
+    payload["complete"] = True
+    entries = load_manifest_entries(snapshot_dir)
+    try:
+        manifest_sha256 = hash_manifest(entries, payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Snapshot manifest must use strict JSON values") from exc
+    _write_json_atomic(meta_path, payload)
+    checksum_payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "manifest_sha256": manifest_sha256,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    _write_json_atomic(snapshot_dir / "manifest.checksum", checksum_payload)
+    _fsync_dir(snapshot_dir)
+
+
+def load_manifest_entries(snapshot_dir: Path) -> list[dict[str, Any]]:
+    """Return strictly validated manifest entry rows for ``snapshot_dir``."""
+    manifest_path = snapshot_dir / "manifest.jsonl"
+    if not manifest_path.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                raise ValueError(f"Manifest entry {line_number} is blank")
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Manifest entry {line_number} is malformed") from exc
+            if not isinstance(entry, dict):
+                raise ValueError(f"Manifest entry {line_number} is not an object")
+            entries.append(entry)
+    return entries
+
+
+def _sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def hash_manifest(entries: list[dict[str, Any]], manifest_meta: dict[str, Any]) -> str:
+    """Hash every manifest entry field and the canonical metadata object.
+
+    Args:
+        entries: Manifest payload-entry objects in emitted order.
+        manifest_meta: Complete manifest metadata object.
+
+    Returns:
+        Lowercase SHA-256 digest of the canonical manifest content.
+
+    Raises:
+        TypeError: If a manifest value is not JSON serializable.
+        ValueError: If a manifest value is not valid strict JSON.
+    """
+    hasher = hashlib.sha256()
+    for entry in entries:
+        hasher.update(
+            json.dumps(
+                entry,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        hasher.update(b"\n")
+    hasher.update(
+        json.dumps(
+            manifest_meta,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    return hasher.hexdigest()
+
+
+def _guess_content_type(path: Path) -> str:
+    if path.suffix.lower() == ".jsonl":
+        return "application/x-ndjson"
+    if path.suffix.lower() == ".parquet":
+        return "application/x-parquet"
+    if path.suffix.lower() == ".json":
+        return "application/json"
+    guessed, _ = mimetypes.guess_type(path.name)
+    return guessed or "application/octet-stream"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    _fsync_file(tmp)
+    os.replace(tmp, path)
+    _fsync_file(path)
+
+
+def _write_text_atomic(path: Path, data: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    _fsync_file(tmp)
+    os.replace(tmp, path)
+    _fsync_file(path)
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            os.fsync(handle.fileno())
+    except FileNotFoundError:
+        return
+
+
+def _fsync_payload_tree(root: Path) -> None:
+    """Durably flush every closed-world payload before manifest emission."""
+    directories = [root]
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"Symlink snapshot payload blocked: {path}")
+        if path.is_dir():
+            directories.append(path)
+        elif path.is_file():
+            if path.name not in _MANIFEST_FILENAMES:
+                _fsync_file(path)
+        else:
+            raise ValueError(f"Unsupported snapshot payload blocked: {path}")
+    for directory in sorted(
+        directories,
+        key=lambda item: len(item.relative_to(root).parts),
+        reverse=True,
+    ):
+        _fsync_dir(directory)
+
+
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

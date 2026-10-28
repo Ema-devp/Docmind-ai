@@ -1,0 +1,715 @@
+"""Integration tests for Settings page (SPEC-001 runtime roundtrip).
+
+Exercises Apply runtime and Save to .env without external dependencies.
+Relies on Streamlit AppTest to run src/pages/04_settings.py in a temp cwd.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
+from typing import NoReturn
+
+import pytest
+from streamlit.testing.v1 import AppTest
+
+pytestmark = pytest.mark.integration
+
+
+def _install_integrations_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Install a lightweight integrations stub for Apply runtime."""
+    import sys
+
+    calls: list[dict[str, object]] = []
+
+    def initialize_integrations(
+        *, force_llm: bool = False, force_embed: bool = False
+    ) -> None:
+        from src.config.settings import settings as _settings
+
+        calls.append(
+            {
+                "force_llm": force_llm,
+                "force_embed": force_embed,
+                "backend": _settings.llm_backend,
+            }
+        )
+        # Keep integration tests offline and deterministic by relying on the
+        # integration-tier Settings.llm guard (MockLLM).
+        from llama_index.core import Settings as LISettings
+
+        if getattr(LISettings, "_llm", None) is None:
+            from llama_index.core.llms import MockLLM
+
+            LISettings.llm = MockLLM(max_tokens=256)
+
+    stub = ModuleType("src.config.integrations")
+    stub.initialize_integrations = initialize_integrations  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src.config.integrations", stub)
+    return calls
+
+
+def _assert_hybrid_toggle_is_read_only(app: AppTest) -> None:
+    """Assert server-side hybrid toggle is exposed as read-only text."""
+    labels = [str(getattr(inp, "label", "")).lower() for inp in app.text_input]
+    assert "server-side hybrid enabled" in labels, (
+        "Expected server-side hybrid retrieval field to be present in Settings page"
+    )
+
+    checkbox_labels = [str(getattr(cb, "label", "")).lower() for cb in app.checkbox]
+    assert not any("server-side hybrid" in lbl for lbl in checkbox_labels), (
+        "Expected server-side hybrid to be displayed as read-only text, not a checkbox"
+    )
+
+
+@pytest.fixture(name="settings_app_test")
+def fixture_settings_app_test(tmp_path, monkeypatch) -> Iterator[AppTest]:
+    """Create an AppTest instance for the Settings page with temp cwd.
+
+    - Runs page in a temporary working directory so Save writes to a temp .env.
+    - Avoids external side effects and keeps tests deterministic.
+    """
+    # Ensure cwd is a temp directory for .env persistence
+    monkeypatch.chdir(tmp_path)
+
+    from llama_index.core import Settings as LISettings
+
+    from src.retrieval.llama_index_adapter import GraphRAGHealth
+
+    original_llm = getattr(LISettings, "_llm", None)
+    original_embed = getattr(LISettings, "_embed_model", None)
+
+    # The Settings page only needs the badge health tuple; dedicated unit tests
+    # cover the LlamaIndex PropertyGraph API check.
+    monkeypatch.setattr(
+        "src.retrieval.llama_index_adapter.get_graphrag_health",
+        lambda *, force_refresh=False: GraphRAGHealth(
+            status="unavailable",
+            adapter_name="unavailable",
+            hint="GraphRAG disabled for Settings AppTest",
+        ),
+    )
+
+    # Build AppTest for the Settings page file.
+    page_path = Path(__file__).resolve().parents[2] / "src" / "pages" / "04_settings.py"
+    try:
+        yield AppTest.from_file(
+            str(page_path),
+            default_timeout=int(os.environ.get("TEST_TIMEOUT", "30")),
+        )
+    finally:
+        LISettings.llm = original_llm  # pyright: ignore[reportAttributeAccessIssue]
+        LISettings.embed_model = (  # pyright: ignore[reportAttributeAccessIssue]
+            original_embed
+        )
+
+
+def test_settings_apply_runtime_calls_initialize_integrations(
+    settings_app_test: AppTest,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_settings_after_test: None,
+) -> None:
+    """Apply runtime should call initialize_integrations.
+
+    Expect force_llm=True and force_embed=False.
+    """
+    app = settings_app_test.run()
+    assert not app.exception
+
+    # Install stub after the initial render to avoid impacting import-time
+    # behavior in environments with additional optional dependencies
+    # (CI llama job).
+    calls = _install_integrations_stub(monkeypatch)
+
+    buttons = [b for b in app.button if getattr(b, "label", "") == "Apply runtime"]
+    assert buttons, "Apply runtime button not found"
+    buttons[0].click().run()
+
+    from src.config.settings import settings as _settings
+
+    assert calls == [
+        {
+            "force_llm": True,
+            "force_embed": False,
+            "backend": _settings.llm_backend,
+        }
+    ], f"Unexpected initialize_integrations calls: {calls}"
+
+
+def test_settings_ignores_hidden_openai_state_when_provider_switches(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """Hidden OpenAI state should not block unrelated providers."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    provider_sel = _find_provider_select(app)
+    app = provider_sel.select("openai_compatible").run()
+    _set_text(app, "Base URL", "not-a-url")
+
+    provider_sel = _find_provider_select(app)
+    app = provider_sel.select("ollama").run()
+    assert not app.exception
+    _click_apply(app)
+
+
+def test_settings_save_persists_env(
+    settings_app_test: AppTest,
+    tmp_path: Path,
+    reset_settings_after_test: None,
+) -> None:
+    """Saving settings should write expected keys into .env in temp cwd."""
+    import sys
+
+    before = set(sys.modules)
+    app = settings_app_test.run()
+    assert not app.exception
+    _assert_hybrid_toggle_is_read_only(app)
+
+    # Perf guard: initial render should not trigger heavy integration imports.
+    after = set(sys.modules)
+    delta = after - before
+    assert "src.config.integrations" not in delta
+
+    # Set a few key fields to ensure persistence writes recognizable values
+    # Model field
+    text_inputs = list(app.text_input)
+    # Find model input by label
+    if model_inputs := [w for w in text_inputs if "Model ID" in str(w)]:
+        model_inputs[0].set_value("Hermes-2-Pro-Llama-3-8B").run()
+
+    # LM Studio base URL (must end with /v1)
+    if lmstudio_inputs := [w for w in text_inputs if "LM Studio base URL" in str(w)]:
+        lmstudio_inputs[0].set_value("http://localhost:1234/v1").run()
+
+    # Ollama advanced settings
+    if api_key_inputs := [w for w in text_inputs if "Ollama API key" in str(w)]:
+        api_key_inputs[0].set_value("key-123").run()
+
+    allow_remote = [w for w in app.checkbox if "Allow remote endpoints" in str(w)]
+    assert allow_remote, "Allow remote endpoints checkbox not found"
+    allow_remote[0].set_value(True).run()
+
+    web_tools = [w for w in app.checkbox if "Enable Ollama web search tools" in str(w)]
+    assert web_tools, "Ollama web tools checkbox not found"
+    web_tools[0].set_value(True).run()
+
+    logprobs = [w for w in app.checkbox if "Enable Ollama logprobs" in str(w)]
+    if logprobs:
+        logprobs[0].set_value(True).run()
+
+    top_logprobs = [w for w in app.number_input if "Top logprobs" in str(w)]
+    assert top_logprobs, "Top logprobs input not found"
+    top_logprobs[0].set_value(2).run()
+
+    # Click Save
+    save_buttons = [b for b in app.button if getattr(b, "label", "") == "Save"]
+    assert save_buttons, "Save button not found"
+    save_buttons[0].click().run()
+
+    # Verify .env was created with keys
+    env_file = tmp_path / ".env"
+    assert env_file.exists(), ".env not created by Save action"
+    from dotenv import dotenv_values
+
+    values = dotenv_values(env_file)
+    assert values.get("DOCMIND_LLM_REQUEST__MODEL") == "Hermes-2-Pro-Llama-3-8B"
+    assert values.get("DOCMIND_LLM_REQUEST__CONTEXT_WINDOW") == "131072"
+    assert values.get("DOCMIND_LLM_REQUEST__MAX_OUTPUT_TOKENS") == "2048"
+    assert values.get("DOCMIND_LLM_REQUEST__TEMPERATURE") == "0.1"
+    assert values.get("DOCMIND_LMSTUDIO_BASE_URL") == "http://localhost:1234/v1"
+    assert values.get("DOCMIND_OLLAMA_API_KEY") == "key-123"
+    assert values.get("DOCMIND_OLLAMA_ENABLE_WEB_SEARCH") == "true"
+    assert values.get("DOCMIND_OLLAMA_ENABLE_LOGPROBS") == "true"
+    assert values.get("DOCMIND_OLLAMA_TOP_LOGPROBS") == "2"
+    assert values.get("DOCMIND_PARSING__PROFILE") == "cpu_safe"
+    assert values.get("DOCMIND_PDF_BACKEND__RENDER_DPI") == "200"
+    assert values.get("DOCMIND_PDF_BACKEND__MIN_TEXT_CHARS_PER_PAGE") == "24"
+    assert values.get("DOCMIND_OCR__FORCE_OCR") == "false"
+    assert values.get("DOCMIND_PARSING__MODEL_CACHE_DIR") is not None
+
+
+def test_settings_save_persists_openai_compatible_env(
+    settings_app_test: AppTest,
+    tmp_path: Path,
+    reset_settings_after_test: None,
+) -> None:
+    """Persist OpenAI-compatible settings to .env."""
+    import json
+
+    app = settings_app_test.run()
+    assert not app.exception
+
+    providers = [w for w in app.selectbox if getattr(w, "label", "") == "LLM Provider"]
+    assert providers, "LLM Provider selectbox not found"
+    app = providers[0].set_value("openai_compatible").run()
+    assert not app.exception
+
+    # Remote provider base URL needs allow_remote_endpoints enabled in tests.
+    allow_remote = [w for w in app.checkbox if "Allow remote endpoints" in str(w)]
+    assert allow_remote, "Allow remote endpoints checkbox not found"
+    app = allow_remote[0].set_value(True).run()
+    assert not app.exception
+
+    # Configure OpenAI-compatible fields.
+    text_inputs = list(app.text_input)
+    base_url_inputs = [w for w in text_inputs if getattr(w, "label", "") == "Base URL"]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    app = base_url_inputs[0].set_value("https://ai-gateway.vercel.sh/v1").run()
+    assert not app.exception
+
+    text_inputs = list(app.text_input)
+    api_key_inputs = [
+        w for w in text_inputs if getattr(w, "label", "") == "API key (optional)"
+    ]
+    assert api_key_inputs, "OpenAI-compatible API key input not found"
+    app = api_key_inputs[0].set_value("key-xyz").run()
+    assert not app.exception
+
+    require_v1 = [
+        w
+        for w in app.checkbox
+        if getattr(w, "label", "") == "Normalize base URL to include /v1"
+    ]
+    assert require_v1, "Require /v1 checkbox not found"
+    app = require_v1[0].set_value(True).run()
+    assert not app.exception
+
+    api_mode = [w for w in app.selectbox if getattr(w, "label", "") == "API mode"]
+    assert api_mode, "API mode selectbox not found"
+    app = api_mode[0].set_value("responses").run()
+    assert not app.exception
+
+    headers_areas = [
+        w
+        for w in app.text_area
+        if getattr(w, "label", "") == "Default headers (JSON object)"
+    ]
+    assert headers_areas, "Default headers text area not found"
+    app = (
+        headers_areas[0]
+        .set_value(
+            json.dumps({"HTTP-Referer": "https://example.com", "X-Test": "1"}, indent=2)
+        )
+        .run()
+    )
+    assert not app.exception
+
+    save_buttons = [b for b in app.button if getattr(b, "label", "") == "Save"]
+    assert save_buttons, "Save button not found"
+    save_buttons[0].click().run()
+
+    env_file = tmp_path / ".env"
+    assert env_file.exists(), ".env not created by Save action"
+    from dotenv import dotenv_values
+
+    values = dotenv_values(env_file)
+    assert values.get("DOCMIND_LLM_BACKEND") == "openai_compatible"
+    assert values.get("DOCMIND_OPENAI__BASE_URL") == "https://ai-gateway.vercel.sh/v1"
+    assert values.get("DOCMIND_OPENAI__API_KEY") == "key-xyz"
+    assert values.get("DOCMIND_OPENAI__REQUIRE_V1") == "true"
+    assert values.get("DOCMIND_OPENAI__API_MODE") == "responses"
+    assert values.get("DOCMIND_OPENAI__DEFAULT_HEADERS") == (
+        '{"HTTP-Referer":"https://example.com","X-Test":"1"}'
+    )
+
+
+def test_settings_preserves_openai_state_when_provider_is_hidden(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """OpenAI-compatible inputs should survive provider switches."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    providers = [w for w in app.selectbox if getattr(w, "label", "") == "LLM Provider"]
+    assert providers, "LLM Provider selectbox not found"
+    app = providers[0].set_value("openai_compatible").run()
+    assert not app.exception
+
+    base_url_inputs = [
+        w for w in app.text_input if getattr(w, "label", "") == "Base URL"
+    ]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    app = base_url_inputs[0].set_value("http://localhost:1234/v1").run()
+    assert not app.exception
+
+    provider_select = _find_provider_select(app)
+    app = provider_select.set_value("ollama").run()
+    assert not app.exception
+
+    provider_select = _find_provider_select(app)
+    app = provider_select.set_value("openai_compatible").run()
+    assert not app.exception
+
+    base_url_inputs = [
+        w for w in app.text_input if getattr(w, "label", "") == "Base URL"
+    ]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    assert str(base_url_inputs[0].value) == "http://localhost:1234/v1"
+
+
+def test_settings_connectivity_test_shows_for_openai_compatible(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """Connectivity test should render for OpenAI-compatible backends."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    providers = [w for w in app.selectbox if getattr(w, "label", "") == "LLM Provider"]
+    assert providers, "LLM Provider selectbox not found"
+    app = providers[0].set_value("openai_compatible").run()
+    assert not app.exception
+
+    text_inputs = list(app.text_input)
+    base_url_inputs = [w for w in text_inputs if getattr(w, "label", "") == "Base URL"]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    app = base_url_inputs[0].set_value("http://localhost:1234/v1").run()
+    assert not app.exception
+
+    test_buttons = [b for b in app.button if getattr(b, "label", "") == "Test endpoint"]
+    assert test_buttons, "Connectivity test button not found for OpenAI-compatible"
+
+
+def test_settings_connectivity_test_timeout_shows_error(
+    settings_app_test: AppTest,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_settings_after_test: None,
+) -> None:
+    """Connectivity test timeout should surface a UI error."""
+    import httpx
+
+    class _TimeoutClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool | None:
+            return False
+
+        def get(self, url: str, headers: dict[str, str] | None = None) -> NoReturn:
+            raise httpx.TimeoutException("timeout")
+
+    monkeypatch.setattr(httpx, "Client", _TimeoutClient)
+
+    app = settings_app_test.run()
+    assert not app.exception
+
+    providers = [w for w in app.selectbox if getattr(w, "label", "") == "LLM Provider"]
+    assert providers, "LLM Provider selectbox not found"
+    app = providers[0].set_value("openai_compatible").run()
+    assert not app.exception
+
+    text_inputs = list(app.text_input)
+    base_url_inputs = [w for w in text_inputs if getattr(w, "label", "") == "Base URL"]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    app = base_url_inputs[0].set_value("http://localhost:1234/v1").run()
+    assert not app.exception
+
+    test_buttons = [b for b in app.button if getattr(b, "label", "") == "Test endpoint"]
+    assert test_buttons, "Connectivity test button not found for OpenAI-compatible"
+    app = test_buttons[0].click().run()
+
+    assert any(
+        "Endpoint test failed" in str(getattr(err, "value", "")) for err in app.error
+    ), "Expected timeout error message not found"
+
+
+def test_settings_connectivity_test_cooldown_disables_button(
+    settings_app_test: AppTest,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_settings_after_test: None,
+) -> None:
+    """Connectivity test button should be disabled during cooldown."""
+    import time
+
+    import httpx
+
+    class _OkResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, list[object]]:
+            return {"data": []}
+
+    class _OkClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def get(self, url: str, headers: dict[str, str] | None = None) -> _OkResponse:
+            return _OkResponse()
+
+    monkeypatch.setattr(httpx, "Client", _OkClient)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+
+    app = settings_app_test.run()
+    assert not app.exception
+
+    providers = [w for w in app.selectbox if getattr(w, "label", "") == "LLM Provider"]
+    assert providers, "LLM Provider selectbox not found"
+    app = providers[0].set_value("openai_compatible").run()
+    assert not app.exception
+
+    text_inputs = list(app.text_input)
+    base_url_inputs = [w for w in text_inputs if getattr(w, "label", "") == "Base URL"]
+    assert base_url_inputs, "OpenAI-compatible Base URL input not found"
+    app = base_url_inputs[0].set_value("http://localhost:1234/v1").run()
+    assert not app.exception
+
+    test_buttons = [b for b in app.button if getattr(b, "label", "") == "Test endpoint"]
+    assert test_buttons, "Connectivity test button not found for OpenAI-compatible"
+    app = test_buttons[0].click().run()
+    assert not app.exception
+
+    app = app.run()
+    test_buttons = [b for b in app.button if getattr(b, "label", "") == "Test endpoint"]
+    assert test_buttons, "Connectivity test button missing after click"
+    assert test_buttons[0].disabled is True
+
+
+def test_settings_save_normalizes_lmstudio_url(
+    settings_app_test: AppTest,
+    tmp_path: Path,
+    reset_settings_after_test: None,
+) -> None:
+    """LM Studio base URL should be normalized to include /v1 on Save."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    text_inputs = list(app.text_input)
+    if lmstudio_inputs := [w for w in text_inputs if "LM Studio base URL" in str(w)]:
+        lmstudio_inputs[0].set_value("http://localhost:1234").run()
+
+    save_buttons = [b for b in app.button if getattr(b, "label", "") == "Save"]
+    assert save_buttons, "Save button not found"
+    save_buttons[0].click().run()
+
+    env_file = tmp_path / ".env"
+    assert env_file.exists(), ".env not created by Save action"
+    from dotenv import dotenv_values
+
+    values = dotenv_values(env_file)
+    assert values.get("DOCMIND_LMSTUDIO_BASE_URL") == "http://localhost:1234/v1"
+
+
+def test_settings_invalid_remote_url_disables_actions(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """Remote URLs should be blocked when allow_remote_endpoints is disabled."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    vllm_inputs = [w for w in app.text_input if "vLLM base URL" in str(w)]
+    assert vllm_inputs, "vLLM base URL input not found"
+    vllm_inputs[0].set_value("http://example.com:8000").run()
+
+    apply_buttons = [
+        b for b in app.button if getattr(b, "label", "") == "Apply runtime"
+    ]
+    save_buttons = [b for b in app.button if getattr(b, "label", "") == "Save"]
+    assert apply_buttons
+    assert save_buttons
+    assert apply_buttons[0].disabled is True
+    assert save_buttons[0].disabled is True
+    assert any(
+        "Remote endpoints are disabled" in str(getattr(e, "value", ""))
+        for e in app.error
+    )
+
+
+def test_settings_allow_remote_allows_remote_urls(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """Remote URLs should be allowed when allow_remote_endpoints is enabled."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    allow_remote = [w for w in app.checkbox if "Allow remote endpoints" in str(w)]
+    assert allow_remote, "Allow remote endpoints checkbox not found"
+    allow_remote[0].set_value(True).run()
+
+    vllm_inputs = [w for w in app.text_input if "vLLM base URL" in str(w)]
+    assert vllm_inputs, "vLLM base URL input not found"
+    vllm_inputs[0].set_value("http://example.com:8000").run()
+
+    apply_buttons = [
+        b for b in app.button if getattr(b, "label", "") == "Apply runtime"
+    ]
+    save_buttons = [b for b in app.button if getattr(b, "label", "") == "Save"]
+    assert apply_buttons
+    assert save_buttons
+    assert apply_buttons[0].disabled is False
+    assert save_buttons[0].disabled is False
+    assert not list(app.error)
+
+
+def test_settings_does_not_require_allowlist_when_remote_endpoints_are_allowed(
+    settings_app_test: AppTest,
+    reset_settings_after_test: None,
+) -> None:
+    """Global remote permission supersedes the narrower Ollama allowlist."""
+    app = settings_app_test.run()
+    assert not app.exception
+
+    allow_remote = [w for w in app.checkbox if "Allow remote endpoints" in str(w)]
+    assert allow_remote, "Allow remote endpoints checkbox not found"
+    allow_remote[0].set_value(True).run()
+
+    web_tool_checks = [
+        w for w in app.checkbox if "Enable Ollama web search tools" in str(w)
+    ]
+    assert web_tool_checks, "Ollama web tools checkbox not found"
+    web_tool_checks[0].set_value(True).run()
+
+    warnings = [str(getattr(w, "value", "")) for w in app.warning]
+    expected_warning = (
+        "Ollama web tools require `https://ollama.com` in "
+        "`DOCMIND_SECURITY__ENDPOINT_ALLOWLIST`."
+    )
+    assert all(msg.strip() != expected_warning for msg in warnings), warnings
+    assert any("Remote endpoints are allowed" in msg for msg in warnings), warnings
+
+
+def _find_provider_select(app: AppTest):
+    """Return the provider selectbox widget."""
+    providers = [s for s in app.selectbox if "LLM Provider" in str(s)]
+    assert providers, "Provider selectbox not found"
+    return providers[0]
+
+
+def _set_text(app: AppTest, label: str, value: str) -> None:
+    """Set a text input by label if present."""
+    fields = [w for w in app.text_input if label in str(w)]
+    if fields:
+        fields[0].set_value(value).run()
+
+
+def _click_apply(app: AppTest) -> None:
+    """Click Apply runtime."""
+    btns = [b for b in app.button if getattr(b, "label", "") == "Apply runtime"]
+    assert btns, "Apply runtime button not found"
+    assert btns[0].disabled is False, (
+        f"Apply runtime unexpectedly disabled; errors={list(app.error)}"
+    )
+    btns[0].click().run()
+    assert not app.exception
+
+
+def _apply_provider(
+    settings_app_test: AppTest,
+    *,
+    provider: str,
+    inputs: dict[str, str],
+) -> None:
+    """Select a provider, set inputs, and apply runtime."""
+    app = settings_app_test.run()
+    assert not app.exception
+    provider_sel = _find_provider_select(app)
+    provider_sel.select(provider).run()
+    for label, value in inputs.items():
+        _set_text(app, label, value)
+    _click_apply(app)
+
+
+@pytest.fixture
+def reset_settings_after_test() -> Iterator[None]:
+    """Reset global settings before and after each test."""
+    import importlib
+
+    def _reset_settings() -> None:
+        settings_mod = importlib.import_module("src.config.settings")
+        current = settings_mod.settings
+        if not isinstance(current, settings_mod.DocMindSettings):  # type: ignore[attr-defined]
+            raise TypeError(
+                "src.config.settings.settings was unexpectedly replaced with a "
+                f"{type(current)!r}; expected DocMindSettings"
+            )
+        current.__init__(_env_file=None)  # type: ignore[arg-type]
+        # Clear bootstrap globals so later tests don't inherit dotenv state.
+        settings_mod.reset_bootstrap_state()
+
+    # Setup: ensure clean state before test
+    _reset_settings()
+    yield
+    # Teardown: reset settings after test
+    _reset_settings()
+
+
+def test_settings_toggle_providers_and_apply(
+    settings_app_test: AppTest,
+    monkeypatch: pytest.MonkeyPatch,
+    reset_settings_after_test: None,
+) -> None:
+    """Toggle each provider and Apply runtime (offline)."""
+    calls = _install_integrations_stub(monkeypatch)
+
+    def _assert_last_call(expected_backend: str) -> None:
+        assert calls, "Expected initialize_integrations to be called"
+        assert calls[-1] == {
+            "force_llm": True,
+            "force_embed": False,
+            "backend": expected_backend,
+        }
+
+    _apply_provider(
+        settings_app_test,
+        provider="ollama",
+        inputs={
+            "Ollama base URL": "http://localhost:11434",
+            "Model ID": "test-ollama",
+        },
+    )
+    from src.config.settings import settings as _settings
+
+    assert _settings.llm_backend == "ollama"
+    _assert_last_call("ollama")
+
+    _apply_provider(
+        settings_app_test,
+        provider="vllm",
+        inputs={
+            "vLLM base URL": "http://localhost:8000",
+            "Model ID": "test-vllm",
+        },
+    )
+    assert _settings.llm_backend == "vllm"
+    _assert_last_call("vllm")
+
+    _apply_provider(
+        settings_app_test,
+        provider="lmstudio",
+        inputs={
+            "LM Studio base URL": "http://localhost:1234/v1",
+            "Model ID": "test-lms",
+        },
+    )
+    assert _settings.llm_backend == "lmstudio"
+    _assert_last_call("lmstudio")
+
+    _apply_provider(
+        settings_app_test,
+        provider="llamacpp",
+        inputs={
+            "llama.cpp server URL": "http://localhost:8080/v1",
+            "Model ID": "llamacpp-server-model",
+        },
+    )
+    assert _settings.llm_backend == "llamacpp"
+    _assert_last_call("llamacpp")
+
+    assert len(calls) == 4

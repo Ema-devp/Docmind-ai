@@ -1,0 +1,104 @@
+---
+title: GPU Setup Guide
+version: 1.0.0
+date: 2026-01-16
+---
+
+## GPU Setup Guide
+
+This guide covers optional GPU acceleration for:
+
+- **LLM serving** (external vLLM server)
+- **Dense/image embeddings and reranking** (PyTorch CUDA)
+- **NLP enrichment** (spaCy via Thinc)
+
+Sparse FastEmbed remains CPU-based because the `fastembed` and
+`fastembed-gpu` distributions are mutually exclusive.
+
+For baseline CPU install, see `docs/user/getting-started.md`.
+
+## NVIDIA CUDA (Linux x86_64 validated; WSL2 best effort)
+
+### Prerequisites
+
+- NVIDIA driver installed and working (`nvidia-smi`)
+- CUDA 12.x toolkit available (`nvcc --version`) if required by your environment
+
+### Install (GPU Extras)
+
+Use the project’s GPU extras. This installs:
+
+- official CUDA 12.8 PyTorch and Torchvision wheels
+- `cupy-cuda12x>=13` (spaCy/Thinc GPU acceleration for CUDA 12.x)
+
+The CPU group and GPU extra are mutually exclusive. Native uv source rules
+select the locked official CUDA 12.8 wheels.
+
+```bash
+uv sync --frozen --no-group cpu --extra gpu
+uv run --no-sync python -m spacy download en_core_web_sm
+```
+
+### vLLM serving (external)
+
+DocMind integrates with vLLM via the OpenAI-compatible HTTP API. Run vLLM in a separate environment (or container) and configure:
+
+- `DOCMIND_LLM_BACKEND=vllm`
+- `DOCMIND_OPENAI__BASE_URL=http://localhost:8000/v1`
+
+### Runtime selection (spaCy / CUDA)
+
+Canonical variables (recommended):
+
+```bash
+export DOCMIND_SPACY__DEVICE=auto   # cpu|cuda|apple|auto
+export DOCMIND_SPACY__GPU_ID=0
+```
+
+Shorthand aliases (supported for backwards-compatibility via `_SPACY_ENV_BRIDGE`):
+
+```bash
+export SPACY_DEVICE=auto   # or cuda
+export SPACY_GPU_ID=0
+```
+
+### Verify (spaCy / CUDA)
+
+```bash
+uv run --no-sync python -c "import torch; print(torch.cuda.is_available())"
+uv run --no-sync python -c "import spacy; print(spacy.__version__); print(spacy.prefer_gpu(0))"
+```
+
+## Apple Silicon (macOS arm64, best effort)
+
+The Apple extra is prebuilt for CPython 3.12 in the current lock. It is not
+release-validated on CPython 3.13 or in dedicated macOS CI.
+
+### Install (Apple Extras)
+
+```bash
+uv sync --frozen --extra apple
+uv run --no-sync python -m spacy download en_core_web_sm
+```
+
+### Runtime selection (spaCy / Apple)
+
+```bash
+export DOCMIND_SPACY__DEVICE=auto   # or apple
+```
+
+### Verify (spaCy / Apple)
+
+```bash
+uv run --no-sync python -c "import spacy; print(spacy.__version__); print(spacy.prefer_gpu(0))"
+```
+
+## Notes on spaCy CUDA extras
+
+spaCy publishes optional CUDA extras like `spacy[cuda12x]`, but the project currently uses
+`numpy==2.x` across platforms. spaCy’s CUDA 12.x extra pins `cupy-cuda12x<13`, which is
+constrained to `numpy<1.29` and cannot be represented alongside the Apple acceleration stack
+in a single `uv.lock` (one version per package).
+
+DocMind therefore installs `cupy-cuda12x>=13` in the GPU extra to keep the lock solvable while
+still enabling spaCy/Thinc GPU execution.

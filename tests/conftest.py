@@ -1,0 +1,297 @@
+"""Top-level pytest configuration and shared fixtures."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+from collections.abc import Generator
+from contextlib import suppress
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+pytest_plugins = [
+    "tests.shared_fixtures",
+    "tests.fixtures.background_jobs",
+]
+
+_REQUIRE_REAL_LLAMA = os.getenv("REQUIRE_REAL_LLAMA", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+
+def _llama_available() -> bool:
+    # `importlib.util.find_spec()` can raise `ValueError` when a test injects a
+    # stub module into `sys.modules` with `__spec__ = None`.
+    try:
+        return importlib.util.find_spec("llama_index.core") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def pytest_configure(config) -> None:  # type: ignore[no-untyped-def]
+    """Register custom markers for this test suite."""
+    config.addinivalue_line(
+        "markers",
+        "requires_llama: mark tests that must run with real llama_index installed.",
+    )
+
+
+def pytest_runtest_setup(item) -> None:  # type: ignore[no-untyped-def]
+    """Handle requires_llama marks with skip/fail behavior."""
+    if "requires_llama" not in item.keywords or _llama_available():
+        return
+    if _REQUIRE_REAL_LLAMA:
+        pytest.fail(
+            "llama_index.core is required for this test but is not installed",
+            pytrace=False,
+        )
+    pytest.skip("llama_index.core not installed")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _streamlit_disable_repl_detection() -> Generator[None]:
+    """Avoid slow `inspect.stack()`-based REPL detection in Streamlit tests.
+
+    Streamlit's `env_util.is_repl()` can be surprisingly expensive in large
+    test suites because it inspects the stack and resolves filesystem paths.
+    AppTest runs Streamlit scripts directly, and the first element enqueue can
+    trigger this check. In our test suite, this can dominate `default_timeout`
+    budgets and create flakiness.
+    """
+    try:
+        from streamlit import env_util
+    except Exception:  # pragma: no cover - Streamlit may be missing in some envs
+        yield
+        return
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(env_util, "is_repl", lambda: False, raising=False)
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _reset_docmind_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep tests deterministic even when a developer `.env` exists.
+
+    Pytest runs in the developer's working tree. Some environments or tools may
+    populate `os.environ` with `DOCMIND_*` keys. Resetting the settings singleton
+    and clearing DocMind-specific env vars prevents cross-test contamination and
+    avoids surprising failures in config tests.
+    """
+    for key in list(os.environ.keys()):
+        if key.upper().startswith("DOCMIND_"):
+            monkeypatch.delenv(key, raising=False)
+
+    from src.config.settings import reset_bootstrap_state
+    from src.config.settings import settings as app_settings
+
+    reset_bootstrap_state()
+    app_settings.__init__(
+        data_dir=tmp_path / "data",
+        _env_file=None,  # type: ignore[arg-type]
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_otel_providers() -> None:
+    """Ensure OpenTelemetry providers reset between tests."""
+    from src.telemetry import opentelemetry as otel_module
+
+    otel_module.shutdown_metrics()
+    otel_module.shutdown_tracing()
+
+
+@pytest.fixture(autouse=True)
+def _reset_telemetry_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_docmind_settings: None,
+) -> None:
+    """Reset telemetry globals and environment overrides between tests."""
+    from src.config.settings import settings as app_settings
+    from src.utils import telemetry as telem
+
+    telem.set_request_id(None)
+
+    # Keep telemetry tests deterministic even if a developer `.env` exists.
+    with suppress(AttributeError):
+        app_settings.telemetry.disabled = False
+        app_settings.telemetry.sample = 1.0
+        app_settings.telemetry.rotate_bytes = 0
+        app_settings.telemetry.jsonl_path = Path("./logs/telemetry.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _stub_embed_model(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Provide a lightweight embedding model for tests that touch embeddings."""
+    module_name = getattr(request.module, "__name__", "")
+    if module_name.startswith("tests.unit.config"):
+        return
+
+    from src.config import integrations as integrations_module
+
+    class _Embed:
+        def get_query_embedding(self, _text: str) -> list[float]:
+            """Return a fixed embedding vector for testing."""
+            return [0.0, 0.1, 0.2]
+
+    def _get_embed_model() -> _Embed:
+        return _Embed()
+
+    monkeypatch.setattr(
+        integrations_module,
+        "get_settings_embed_model",
+        _get_embed_model,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.retrieval.hybrid.get_settings_embed_model",
+        _get_embed_model,
+        raising=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_qdrant_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide an in-memory Qdrant client stub to avoid network access."""
+    from src.config import settings as app_settings
+
+    class _FakeQdrantClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self._collections: dict[str, dict[str, object]] = {}
+
+        def collection_exists(self, name: str) -> bool:
+            """Check if a collection exists."""
+            return name in self._collections
+
+        def get_collection(self, name: str) -> SimpleNamespace:
+            """Get collection configuration and metadata."""
+            cfg = self._collections.get(name)
+            if cfg is None:
+                cfg = {
+                    "vectors_config": {
+                        "text-dense": SimpleNamespace(
+                            size=app_settings.embedding.dimension
+                        )
+                    },
+                    "sparse_vectors_config": {"text-sparse": SimpleNamespace()},
+                }
+            params = SimpleNamespace(
+                vectors_config=cfg.get("vectors_config"),
+                sparse_vectors_config=cfg.get("sparse_vectors_config"),
+            )
+            return SimpleNamespace(config=SimpleNamespace(params=params))
+
+        def create_collection(self, collection_name: str, **kwargs: object) -> None:
+            """Create a new collection with the given configuration."""
+            self._collections[collection_name] = {
+                "vectors_config": kwargs.get("vectors_config", {}),
+                "sparse_vectors_config": kwargs.get("sparse_vectors_config", {}),
+            }
+
+        def update_collection(
+            self, *args: object, **kwargs: object
+        ) -> None:  # pragma: no cover
+            """Update collection configuration."""
+            return None
+
+        def recreate_collection(
+            self, *args: object, **kwargs: object
+        ) -> None:  # pragma: no cover
+            """Recreate an existing collection."""
+            return None
+
+        def query_points(self, **kwargs: object) -> SimpleNamespace:  # pragma: no cover
+            """Query points from the collection."""
+            return SimpleNamespace(points=[])
+
+        def query_points_groups(
+            self, **kwargs: object
+        ) -> SimpleNamespace:  # pragma: no cover
+            """Query grouped points from the collection."""
+            return SimpleNamespace(groups=[])
+
+        def close(self) -> None:  # pragma: no cover
+            """Close the client connection."""
+            return None
+
+    def _create_fake_qdrant(*args: object, **kwargs: object) -> _FakeQdrantClient:
+        return _FakeQdrantClient(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.retrieval.hybrid.QdrantClient",
+        _create_fake_qdrant,
+        raising=False,
+    )
+    with suppress(ImportError):
+        from tools.eval import run_beir as beir_module
+
+        monkeypatch.setattr(
+            beir_module,
+            "QdrantClient",
+            _create_fake_qdrant,
+            raising=False,
+        )
+    monkeypatch.setattr(
+        "src.utils.storage.QdrantClient", _FakeQdrantClient, raising=False
+    )
+
+
+@pytest.fixture
+def integration_settings():
+    """Provide standardized integration settings with lightweight embedding."""
+    from tests.fixtures.test_settings import create_integration_settings
+
+    s = create_integration_settings()
+    s.embedding.model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    return s
+
+
+@pytest.fixture
+def system_settings():
+    """Provide system-tier settings approximating production configuration."""
+    from tests.fixtures.test_settings import create_system_settings
+
+    return create_system_settings()
+
+
+@pytest.fixture
+def lightweight_embedding_model():
+    """Provide a lightweight embedding model stub for integration tests."""
+    import numpy as np
+
+    class _MiniLM:
+        def encode(self, items: list[str]):
+            """Encode text items to fixed embeddings for testing."""
+            return np.zeros((len(items), 384), dtype=np.float32)
+
+    return _MiniLM()
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent external LLM initialization during tests."""
+    if not _llama_available():
+        return
+    from llama_index.core import Settings
+    from llama_index.core.llms.mock import MockLLM
+
+    from src.config import integrations as integrations_module
+
+    def _build_mock_llm(*_a: object, **_k: object) -> MockLLM:
+        return MockLLM()
+
+    monkeypatch.setattr(integrations_module, "build_llm", _build_mock_llm)
+    monkeypatch.setattr(Settings, "_llm", MockLLM(), raising=False)

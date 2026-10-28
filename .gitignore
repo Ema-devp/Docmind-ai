@@ -1,0 +1,357 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.ruff_cache/
+coverage/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+junit.xml
+coverage.xml
+coverage.json
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+coverage_badge.svg
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+#   This repository pins Python for reproducible local development and `uv run`
+#   behavior via `.python-version` (see `pyproject.toml` requires-python).
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# UV
+#   Include uv.lock in version control for deterministic CI installs.
+#   This is especially recommended for applications and binary packages.
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#poetry.lock
+
+# pdm
+#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#pdm.lock
+#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
+#   in version control.
+#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
+.pdm.toml
+.pdm-python
+.pdm-build/
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.env.example.old
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#.idea/
+
+# PyPI configuration file
+.pypirc
+
+# Project specific
+CLAUDE.md
+.claude/
+logs/
+docmind_ai.log
+.agents/
+repomix-output.*
+tests-output.md
+core-files-output.md
+skills-lock.json
+crawled/
+TODO.md.bak
+ai-research/
+.spec-updates/
+agent-logs/
+docs/specs/.workflow/
+docs/specs/.archived/
+docs/specs/prompts/
+docs/developers/worklogs/
+all-specs-adrs.xml
+.cursorignore
+opensrc/
+.codex/
+.opencode/
+/agent_audit*
+migration_plan.md
+
+# Local Dependabot remediation evidence
+dependabot-alerts-after.json
+dependabot-alerts-before.json
+uv-tree-after-upgrades.txt
+uv-tree-before.txt
+uv-tree-final.txt
+
+# Snapshot persistence artifacts
+storage/
+!tests/unit/utils/storage/
+data/storage/
+data/uploads/
+**/_tmp-*/
+**/graph_exports/
+
+# Performance test artifacts
+tests/performance/reports/
+tests/performance/baselines/baseline.json
+
+# Model caches and embeddings
+embeddings_cache/
+.fastembed_cache/
+# models/
+qdrant_storage/
+data/qdrant/
+data/qdrant-local/
+data/artifacts/
+.archived/
+
+# docs/adrs/archived/
+TODO-COMPLETED.md
+TODO.md
+
+# Document processing cache
+# cache/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
+# Tool caches
+.ruff_cache/
+.cache/
+.benchmarks/
+
+# Session files
+session.json
+*.session
+
+# Test runtime data/caches
+integration_test_cache/
+integration_test_data/
+query_workflow_cache/
+query_workflow_data/
+system_test_cache/
+system_test_data/
+test_cache/
+vector_test_cache/
+vector_test_data/
+unused/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Emacs
+\#*\#
+.\#*
+
+# Specification management
+update-plan-*.json
+docs/specs/archived/
+docs/specs.backup.*
+docs/adrs/archived/
+docs/developers/archived/
+reports/
+docs/research/
+ADR_TEMPLATE.md
+docs/specs/analysis/
+CLEANUP_TRACKING.md
+docmind.zip
+
+# Prevent test files in root directory
+/test_*.py
+/tests_*.py
+/Test*.py
+
+# Mock and temporary directories that might be created during development
+*Mock*/
+*MagicMock*/
+*mock*/
+temp_*/
+tmp_*/
+temporary/
+relative/
+
+# Additional cache and runtime patterns
+.streamlit/*
+!.streamlit/config.toml
+*.sqlite
+*.sqlite3
+*.pickle
+*.pkl
+
+# Development artifacts that shouldn't be tracked
+debug_*.py
+scratch_*.py
+experiment_*.py
+# Local GitHub metadata
+.gh/
+.gh_*
+
+# DocMind project data and logs (QA additions)
+# Document processing caches
+cache/
+cache/**/*.duckdb
+cache/**/*.sqlite
+
+# Local analytics and telemetry artifacts
+logs/
+!logs/.keep
+logs/**/*.jsonl
+
+# Application data directory — ignore generated snapshots and local DBs
+data/storage/
+data/**/*.duckdb
+data/**/*.sqlite
+data/**/*.db
+
+# Keep evaluation datasets and docs under data/eval
+!data/eval/
+!data/eval/**
+
+# opensrc - source code for packages
+opensrc/
+data/.corpus_manifest.json
+data/.deployment-id

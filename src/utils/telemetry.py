@@ -1,0 +1,328 @@
+"""Lightweight JSONL telemetry emitter.
+
+Writes events to `settings.telemetry.jsonl_path` (default `./logs/telemetry.jsonl`)
+to keep observability local-first. Use `get_telemetry_jsonl_path()` for the
+effective path, and `get_analytics_duckdb_path()` for settings-aware analytics DB
+paths.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import dataclasses
+import json
+import random
+from collections import Counter
+from contextvars import ContextVar
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+from src.config.settings import settings
+
+# Internal default path; prefer get_analytics_duckdb_path() for settings-aware use.
+_ANALYTICS_DUCKDB_PATH = Path("data/analytics/analytics.duckdb")
+
+# Context-managed request id (optional). When set, it will be added to events.
+_REQUEST_ID: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+
+def set_request_id(request_id: str | None) -> None:
+    """Set the request ID for subsequent telemetry events in this context.
+
+    Args:
+        request_id: The request identifier to attach; None to clear.
+    """
+    _REQUEST_ID.set(request_id)
+
+
+def get_request_id() -> str | None:
+    """Return the current context request ID, if any."""
+    return _REQUEST_ID.get()
+
+
+def _ensure_dir(path: Path) -> None:
+    """Ensure `path.parent` exists, suppressing filesystem errors."""
+    with contextlib.suppress(Exception):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _maybe_rotate(path: Path) -> None:
+    """Rotate file if it exceeds the configured size limit (size-based)."""
+    limit = int(settings.telemetry.rotate_bytes)
+    if limit <= 0:
+        return
+    try:
+        if path.exists() and path.stat().st_size >= limit:
+            rotated = path.with_suffix(path.suffix + ".1")
+            # Remove previous rotated if present
+            with contextlib.suppress(Exception):
+                rotated.unlink()
+            path.rename(rotated)
+    except OSError as exc:
+        # Never fail the app due to rotation; log at debug level
+        from src.utils.log_safety import build_pii_log_entry
+
+        redaction = build_pii_log_entry(str(exc), key_id="telemetry.rotate")
+        logger.debug(
+            f"telemetry rotation skipped (error_type={type(exc).__name__} "
+            f"error={redaction.redacted})"
+        )
+
+
+def _sanitize_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Apply telemetry hygiene (local-first; no blobs/paths)."""
+
+    def _sanitize_value(value: Any, *, depth: int) -> Any:
+        # Always convert Path objects regardless of depth.
+        if isinstance(value, Path):
+            return value.name
+        if depth <= 0:
+            return value
+        if isinstance(value, dict):
+            return _sanitize_mapping(value, depth=depth - 1)
+        if isinstance(value, list):
+            return [_sanitize_value(v, depth=depth - 1) for v in value]
+        return value
+
+    def _sanitize_mapping(mapping: dict[Any, Any], *, depth: int) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        for key, value in mapping.items():
+            skey = str(key)
+            # Never persist base64 blobs.
+            if "base64" in skey.lower():
+                continue
+            # Avoid persisting filesystem paths; keep only a safe basename.
+            if (skey == "path" or skey.endswith("_path")) and isinstance(value, str):
+                v = value
+                is_abs_unix = v.startswith("/") and not v.startswith("//")
+                is_unc = v.startswith("\\\\")
+                is_windows_drive = len(v) >= 2 and v[1] == ":" and v[0].isalpha()
+                is_relative_with_sep = (
+                    ("/" in v or "\\" in v)
+                    and not v.startswith(
+                        (
+                            "http://",
+                            "https://",
+                            "s3://",
+                            "gs://",
+                            "ftp://",
+                            "file://",
+                            "blob:",
+                            "//",
+                        )
+                    )
+                    and not v.startswith("data:")
+                )
+                if is_abs_unix or is_unc or is_windows_drive or is_relative_with_sep:
+                    cleaned[skey] = Path(v).name
+                    continue
+            cleaned[skey] = _sanitize_value(value, depth=depth)
+        return cleaned
+
+    return _sanitize_mapping(event, depth=5)
+
+
+def log_jsonl(event: dict[str, Any]) -> None:
+    """Append a JSON event with ISO timestamp to the local JSONL file.
+
+    Args:
+        event: Flat key-value telemetry dictionary.
+    """
+    if settings.telemetry.disabled:
+        return
+    rate = float(settings.telemetry.sample)
+    if rate < 1.0 and random.random() >= rate:  # noqa: S311 # nosec B311
+        return
+
+    rec = {
+        "ts": datetime.now(UTC).isoformat(),
+        **_sanitize_event(event),
+    }
+    # Include request_id when present
+    with contextlib.suppress(LookupError):
+        if rid := _REQUEST_ID.get():
+            rec.setdefault("request_id", rid)
+    path = get_telemetry_jsonl_path()
+    _ensure_dir(path)
+    _maybe_rotate(path)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def get_telemetry_jsonl_path() -> Path:
+    """Return the canonical local telemetry JSONL path."""
+    return settings.telemetry.jsonl_path
+
+
+def get_analytics_duckdb_path(
+    override: Path | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> Path:
+    """Return the local analytics DuckDB path (optionally overridden).
+
+    The default path is ``<base_dir>/analytics/analytics.duckdb``. Overrides
+    must point to a file with a ``.duckdb`` or ``.db`` suffix and live in a
+    subdirectory of the resolved base directory; overrides located directly at
+    the base root are ignored and fall back to the default path.
+    """
+    resolved_base = (
+        base_dir or settings.data_dir or _ANALYTICS_DUCKDB_PATH.parent.parent
+    ).resolve()
+    default_path = resolved_base / "analytics" / "analytics.duckdb"
+    if override is None:
+        return default_path
+
+    candidate = Path(override)
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return default_path
+
+    is_under_base = resolved_base in resolved.parents
+    has_valid_suffix = resolved.suffix in {".duckdb", ".db"}
+    if is_under_base and has_valid_suffix:
+        return resolved
+
+    reason = f"outside {resolved_base}" if not is_under_base else "invalid extension"
+    logger.warning(
+        f"analytics db path override ignored ({reason}): "
+        f"override={candidate} base={resolved_base}"
+    )
+    return default_path
+
+
+@dataclasses.dataclass(slots=True)
+class TelemetryEventCounts:
+    """Aggregated telemetry counters for safe display in the Analytics page."""
+
+    router_selected_by_route: dict[str, int]
+    snapshot_stale_detected: int
+    export_performed: int
+    lines_read: int
+    bytes_read: int
+    invalid_lines: int
+    truncated: bool
+
+
+def parse_telemetry_jsonl_counts(
+    path: Path | None = None,
+    *,
+    max_lines: int = 50_000,
+    max_bytes: int = 25 * 1024 * 1024,
+) -> TelemetryEventCounts:
+    """Parse local telemetry JSONL and return bounded aggregate counts.
+
+    This is intentionally streaming/bounded to avoid loading large telemetry logs
+    into memory. Invalid JSON lines are ignored.
+    """
+    if max_lines <= 0 or max_bytes <= 0:
+        return TelemetryEventCounts(
+            router_selected_by_route={},
+            snapshot_stale_detected=0,
+            export_performed=0,
+            lines_read=0,
+            bytes_read=0,
+            invalid_lines=0,
+            truncated=False,
+        )
+
+    p = get_telemetry_jsonl_path() if path is None else Path(path)
+    if not p.exists():
+        return TelemetryEventCounts(
+            router_selected_by_route={},
+            snapshot_stale_detected=0,
+            export_performed=0,
+            lines_read=0,
+            bytes_read=0,
+            invalid_lines=0,
+            truncated=False,
+        )
+
+    router_counts: Counter[str] = Counter()
+    stale = 0
+    exports = 0
+    bytes_read = 0
+    lines_read = 0
+    invalid_lines = 0
+    truncated = False
+
+    try:
+        with p.open("rb") as f:
+            for raw_line in f:
+                next_lines_read = lines_read + 1
+                next_bytes_read = bytes_read + len(raw_line)
+                if next_lines_read > max_lines or next_bytes_read > max_bytes:
+                    # Truncation stops before counting/processing the next line.
+                    truncated = True
+                    break
+                lines_read = next_lines_read
+                bytes_read = next_bytes_read
+                try:
+                    line = raw_line.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    invalid_lines += 1
+                    continue
+                if not line:
+                    continue
+                try:
+                    evt = json.loads(line)
+                except json.JSONDecodeError:
+                    invalid_lines += 1
+                    continue
+                if not isinstance(evt, dict):
+                    invalid_lines += 1
+                    continue
+
+                if evt.get("router_selected"):
+                    route = str(evt.get("route") or "unknown")
+                    router_counts[route] += 1
+                if evt.get("snapshot_stale_detected"):
+                    stale += 1
+                if evt.get("export_performed"):
+                    exports += 1
+    except OSError as exc:
+        logger.debug(
+            "telemetry parse failed (oserror): "
+            f"err={getattr(exc, 'errno', None)} msg={exc}"
+        )
+        return TelemetryEventCounts(
+            router_selected_by_route={},
+            snapshot_stale_detected=0,
+            export_performed=0,
+            lines_read=0,
+            bytes_read=0,
+            invalid_lines=0,
+            truncated=False,
+        )
+
+    if truncated:
+        logger.info(
+            "telemetry parse cap hit: "
+            f"path={p} lines={lines_read} bytes={bytes_read} "
+            f"(max_lines={max_lines} max_bytes={max_bytes})"
+        )
+
+    return TelemetryEventCounts(
+        router_selected_by_route=dict(router_counts),
+        snapshot_stale_detected=stale,
+        export_performed=exports,
+        lines_read=lines_read,
+        bytes_read=bytes_read,
+        invalid_lines=invalid_lines,
+        truncated=truncated,
+    )
+
+
+__all__ = [
+    "TelemetryEventCounts",
+    "get_analytics_duckdb_path",
+    "get_request_id",
+    "get_telemetry_jsonl_path",
+    "log_jsonl",
+    "parse_telemetry_jsonl_counts",
+    "set_request_id",
+]

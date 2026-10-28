@@ -1,0 +1,261 @@
+"""Clean test-specific settings using BaseSettings subclass pattern.
+
+This module provides test-optimized settings following the pytest + pydantic-settings
+pattern aligned with the recovered configuration architecture. Properly inherits from
+the unified DocMindSettings with nested configuration models.
+
+Architecture:
+- MockDocMindSettings: Fast unit tests with CPU-only, optimized defaults
+- IntegrationTestSettings: Moderate performance for integration tests
+- SystemTestSettings: Production settings for full system tests
+
+Key Features:
+- Test-production separation via optimized nested config defaults
+- ADR compliance testing support
+- Clean temporary directory management
+- No backward compatibility code bloat
+"""
+
+from pathlib import Path
+from typing import Any
+
+from pydantic import Field
+from pydantic_settings import SettingsConfigDict
+
+from src.config.settings import (
+    SETTINGS_MODEL_CONFIG,
+    AgentConfig,
+    CacheConfig,
+    DocMindSettings,
+    EmbeddingConfig,
+    LLMRequestConfig,
+    ProcessingConfig,
+    RetrievalConfig,
+)
+
+
+class MockLLMRequestConfig(LLMRequestConfig):
+    """Test-optimized LLM request configuration."""
+
+    # Small context for speed
+    context_window: int = Field(default=8192, ge=8192, le=200000)
+    max_output_tokens: int = Field(default=256, ge=100, le=8192)
+
+
+class MockProcessingConfig(ProcessingConfig):
+    """Test-optimized processing configuration for small, fast documents."""
+
+    # Small chunks for speed
+    chunk_size: int = Field(default=100, ge=100, le=10000)
+    max_document_size_mb: int = Field(default=1, ge=1, le=500)
+
+
+class MockAgentConfig(AgentConfig):
+    """Test-optimized agent configuration for fast decisions."""
+
+    # Fast timeouts for testing
+    decision_timeout: int = Field(default=100, ge=10, le=1000)  # 100ms for tests
+    max_retries: int = Field(default=1, ge=0, le=10)  # Fewer retries
+
+
+class MockEmbeddingConfig(EmbeddingConfig):
+    """Test-optimized embedding configuration for minimal resource usage."""
+
+    # Small dimensions and batches for speed
+    model_name: str = Field(default="test/mock-embedding")
+    dimension: int = Field(default=384, ge=256, le=4096)  # Smaller than production
+    max_length: int = Field(default=512, ge=512, le=16384)  # Smaller context
+    batch_size_gpu: int = Field(default=2, ge=1, le=128)  # Small batches
+    batch_size_cpu: int = Field(default=1, ge=1, le=32)  # Single item batches
+
+
+class MockRetrievalConfig(RetrievalConfig):
+    """Test-optimized retrieval configuration for fast searches."""
+
+    top_k: int = Field(default=5, ge=1, le=50)  # Fewer results
+    reranking_top_k: int = Field(default=3, ge=1, le=20)  # Fewer reranked results
+
+
+class MockCacheConfig(CacheConfig):
+    """Test-isolated cache path configuration."""
+
+    dir: Path = Field(default=Path("./test_cache"))
+
+
+class MockDocMindSettings(DocMindSettings):
+    """Test-specific configuration with overrides for fast, deterministic testing.
+
+    Inherits from production settings but provides test-optimized defaults through
+    nested configuration overrides. Designed for unit tests with:
+    - CPU-only operation (no GPU dependencies)
+    - Minimal resource usage (small contexts, batches)
+    - Fast timeouts (100ms agent decisions)
+    - Disabled caching (test isolation)
+    - Small document sizes (fast processing)
+    """
+
+    __test__ = False
+
+    model_config = SettingsConfigDict(
+        env_file=None,  # Don't load .env in tests
+        env_prefix="DOCMIND_TEST_",  # Use different prefix for isolation
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        validate_default=True,
+        extra="forbid",
+    )
+
+    # Basic app settings optimized for testing
+    debug: bool = Field(default=True)
+    log_level: str = Field(default="DEBUG")
+
+    # Temporary directories for test isolation
+    data_dir: Path = Field(default=Path("./test_data"))
+    log_file: Path = Field(default=Path("./test_logs/test.log"))
+
+    # Disable expensive operations for unit tests
+    enable_gpu_acceleration: bool = Field(default=False)  # CPU-only for tests
+
+    # Override nested configurations with test-optimized versions
+    llm_request: MockLLMRequestConfig = Field(default_factory=MockLLMRequestConfig)
+    processing: MockProcessingConfig = Field(default_factory=MockProcessingConfig)
+    agents: MockAgentConfig = Field(default_factory=MockAgentConfig)
+    embedding: MockEmbeddingConfig = Field(default_factory=MockEmbeddingConfig)
+    retrieval: MockRetrievalConfig = Field(default_factory=MockRetrievalConfig)
+    cache: MockCacheConfig = Field(default_factory=MockCacheConfig)
+
+    def model_post_init(self, __context: Any) -> None:
+        """Post-initialization with test-specific optimizations."""
+        # Create test directories (separate from production)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.cache.dir.mkdir(parents=True, exist_ok=True)
+        self.log_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Call parent's post_init
+        super().model_post_init(__context)
+
+
+class IntegrationLLMRequestConfig(LLMRequestConfig):
+    """Integration test request config with moderate resource usage."""
+
+    context_window: int = Field(default=32768, ge=8192, le=200000)  # Moderate context
+    max_output_tokens: int = Field(default=1024, ge=100, le=8192)
+
+
+class IntegrationAgentConfig(AgentConfig):
+    """Integration test agent config with realistic timeouts."""
+
+    decision_timeout: int = Field(
+        default=200, ge=10, le=1000
+    )  # ADR-011 compliant 200ms
+    max_retries: int = Field(default=2, ge=0, le=10)  # Standard retries
+
+
+class IntegrationProcessingConfig(ProcessingConfig):
+    """Integration processing config with larger, safer chunk sizes.
+
+    Prevents metadata-length > chunk-size errors in pipeline during tests.
+    """
+
+    chunk_size: int = Field(default=2048, ge=256, le=10000)
+
+
+class IntegrationCacheConfig(CacheConfig):
+    """Integration test cache path configuration."""
+
+    dir: Path = Field(default=Path("./test_cache"))
+
+
+class IntegrationTestSettings(MockDocMindSettings):
+    """Integration test settings with moderate performance requirements.
+
+    Balances test speed with realistic configuration for component integration.
+    Enables more features than unit tests but lighter than full system tests.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        env_prefix="DOCMIND_INTEGRATION_",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        validate_default=True,
+        extra="forbid",
+    )
+
+    # Enable realistic features for integration testing
+    enable_gpu_acceleration: bool = Field(default=True)
+
+    # Override with integration-specific nested configs
+    llm_request: IntegrationLLMRequestConfig = Field(
+        default_factory=IntegrationLLMRequestConfig
+    )
+    agents: IntegrationAgentConfig = Field(default_factory=IntegrationAgentConfig)
+    processing: IntegrationProcessingConfig = Field(
+        default_factory=IntegrationProcessingConfig
+    )
+    cache: IntegrationCacheConfig = Field(default_factory=IntegrationCacheConfig)
+
+    # Convenience alias for tests expecting a flat attribute
+    @property
+    def embedding_dimension(self) -> int:  # pragma: no cover - simple proxy
+        """Expose embedding dimension at top-level for fixture compatibility."""
+        return int(self.embedding.dimension)
+
+
+class SystemTestSettings(DocMindSettings):
+    """System test settings - uses production defaults.
+
+    Full production configuration for comprehensive end-to-end testing.
+    No overrides - validates the actual production configuration.
+    Uses production nested configurations with all features enabled.
+    """
+
+    model_config = SettingsConfigDict(
+        **SETTINGS_MODEL_CONFIG,
+        validate_default=True,
+    )
+
+    # Uses all production defaults from DocMindSettings and nested configurations
+    # This ensures system tests validate the actual production setup
+
+
+def create_test_settings(**overrides) -> MockDocMindSettings:
+    """Factory function for creating test settings with specific overrides.
+
+    Args:
+        **overrides: Field overrides for the test settings
+
+    Returns:
+        MockDocMindSettings instance with applied overrides
+
+    Example:
+        settings = create_test_settings(
+            enable_gpu_acceleration=True,
+            debug=True
+        )
+    """
+    return MockDocMindSettings(**overrides)
+
+
+def create_integration_settings(**overrides) -> IntegrationTestSettings:
+    """Factory function for creating integration test settings.
+
+    Args:
+        **overrides: Field overrides for the integration settings
+
+    Returns:
+        IntegrationTestSettings instance with applied overrides
+    """
+    return IntegrationTestSettings(**overrides)
+
+
+def create_system_settings(**overrides) -> SystemTestSettings:
+    """Factory function for creating system test settings.
+
+    Args:
+        **overrides: Field overrides for the system settings
+
+    Returns:
+        SystemTestSettings instance with applied overrides
+    """
+    return SystemTestSettings(**overrides)

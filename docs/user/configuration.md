@@ -1,0 +1,119 @@
+# User Configuration
+
+This page summarizes common runtime configuration for DocMind AI. For a full developer‑level reference, see [Configuration Guide](../developers/configuration.md). For quick examples, see the Environment Variables section in README.md.
+
+## Core Settings
+
+- LLM provider & base URLs
+- Context window and timeouts
+- GPU acceleration (CUDA) and memory utilization
+
+### OpenAI-compatible providers (cloud/gateways/local servers)
+
+DocMind supports any OpenAI-compatible endpoint via:
+
+```bash
+DOCMIND_LLM_BACKEND=openai_compatible
+DOCMIND_OPENAI__BASE_URL=http://localhost:1234/v1   # or a cloud/gateway URL
+DOCMIND_OPENAI__API_KEY=not-needed                  # or a real key for cloud
+```
+
+Optional advanced knobs:
+
+```bash
+DOCMIND_OPENAI__API_MODE=chat_completions  # or responses (only when supported)
+DOCMIND_OPENAI__REQUIRE_V1=true            # disable for LiteLLM Proxy default root
+DOCMIND_OPENAI__DEFAULT_HEADERS='{"HTTP-Referer":"","X-Title":""}'
+```
+
+## Avoid Global API Keys (Optional)
+
+By default, exported environment variables take precedence over `.env`.
+
+If you have global machine variables like `OPENAI_API_KEY` set but want DocMind
+to use only DocMind-scoped configuration, you can opt in to one of these modes:
+
+- Prefer repo `.env` over exported env vars for DocMind settings:
+  - `DOCMIND_CONFIG__DOTENV_PRIORITY=dotenv_first`
+  - Safety: `security.*` remains env-first.
+- Prevent dependencies from using global env vars (allowlist only):
+  - `DOCMIND_CONFIG__ENV_MASK_KEYS=OPENAI_API_KEY`
+- Provide a compatible env var for dependencies from DocMind settings:
+  - Set `DOCMIND_OPENAI__API_KEY=...` and then:
+  - `DOCMIND_CONFIG__ENV_OVERLAY=OPENAI_API_KEY:openai.api_key`
+
+These modes are intended for local development; avoid in production.
+
+## Retrieval & GraphRAG
+
+```bash
+# Hybrid fusion mode (server-side only)
+DOCMIND_RETRIEVAL__FUSION_MODE=rrf   # or dbsf (experimental)
+
+# De-duplication key for fused results
+DOCMIND_RETRIEVAL__DEDUP_KEY=page_id  # or doc_id
+
+# Prefetch limits (per-branch)
+DOCMIND_RETRIEVAL__PREFETCH_DENSE_LIMIT=200
+DOCMIND_RETRIEVAL__PREFETCH_SPARSE_LIMIT=400
+
+# Reranking policy (always-on; override via env)
+DOCMIND_RETRIEVAL__USE_RERANKING=true   # set false to disable
+
+# GraphRAG ingestion default (off)
+DOCMIND_GRAPHRAG_CFG__ENABLED=false
+
+# Enable server-side hybrid tool (default OFF)
+DOCMIND_RETRIEVAL__ENABLE_SERVER_HYBRID=false
+
+# Telemetry (local JSONL; sampling)
+DOCMIND_TELEMETRY_SAMPLE=1.0            # 0.0..1.0; 1.0 logs all
+DOCMIND_TELEMETRY_DISABLED=false        # true to disable telemetry
+DOCMIND_TELEMETRY_ROTATE_BYTES=0        # rotate at N bytes (0 disables)
+DOCMIND_TELEMETRY__JSONL_PATH=./logs/telemetry.jsonl  # advanced: override path
+# Note: single-underscore vars (e.g., DOCMIND_TELEMETRY_SAMPLE) are flat bridge
+# aliases, while double underscore (e.g., DOCMIND_TELEMETRY__JSONL_PATH) targets
+# nested settings directly.
+
+# Hybrid fusion algorithm
+DOCMIND_RETRIEVAL__FUSION_MODE=rrf      # rrf or dbsf
+```
+
+Notes:
+
+- Fusion is performed server‑side via the Qdrant Query API; there are no client‑side fusion knobs.
+- The knowledge_graph router tool is activated only when a PropertyGraphIndex is present and healthy; traversal depth defaults to path_depth=1.
+- When `DOCMIND_RETRIEVAL__ENABLE_SERVER_HYBRID=true`, the router factory registers a
+  server-side hybrid tool that executes Qdrant Query API `prefetch` + `Fusion.RRF` (DBSF optional).
+  `settings.retrieval.enable_server_hybrid` is the sole runtime owner of this policy.
+
+## NLP Enrichment (spaCy)
+
+DocMind can optionally enrich ingested text chunks with:
+
+- sentence spans (start/end offsets)
+- entity spans (label + text + offsets)
+
+Install a model (recommended for best results):
+
+```bash
+uv run python -m spacy download en_core_web_sm
+```
+
+Common knobs:
+
+```bash
+# Enable/disable enrichment
+DOCMIND_SPACY__ENABLED=true
+
+# Device preference: cpu|cuda|apple|auto
+DOCMIND_SPACY__DEVICE=auto
+DOCMIND_SPACY__GPU_ID=0
+```
+
+GPU installs:
+
+- NVIDIA CUDA (release-validated on Linux x86_64): `uv sync --frozen --no-group cpu --extra gpu`; sparse FastEmbed remains CPU-based
+- Apple Silicon (best effort on macOS arm64 with CPython 3.12): `uv sync --frozen --extra apple`
+
+Details: `docs/specs/spec-015-nlp-enrichment-spacy.md` and `docs/developers/gpu-setup.md`.

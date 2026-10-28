@@ -1,0 +1,273 @@
+{
+  "benchmark_schema_version": 3,
+  "fixture_count": 8,
+  "fixtures": {
+    "adversarial_text.pdf": "f1ed6b560cb10807039f22816ebded32613ce5d3b620454dbfff13a8ab7b97c2",
+    "born_digital.pdf": "1f67d5663c3921ccb6582e2f933f849c2b31af10438c7aa1990b3ef0c288df52",
+    "formula_heavy.pdf": "f0ab778058a769b15c5903d4e614a5f282abc1494ead3f34fc840d262b168a08",
+    "multilingual.pdf": "70f1c8924da991987b95cf2e5abc157af057749ca26cd8246aebdf2cfa4827f9",
+    "multipage_native.pdf": "85a07165e3dffa3aeebc3ca850039cb40a95ff690a0f3066f90546a38eaf10c2",
+    "photo_skewed.pdf": "c4a8dd0aaf2be5c22a68beab1577f6b55e5f03734eaa0d599c95060c89b0a51d",
+    "scanned.pdf": "7a5834af7715b3e4e024f4a9cf9d40e3fd36f56cb53350d61aa693d9b5547f02",
+    "table_heavy.pdf": "b28a93e83adca789b1d77799eaac8686edc0e76c5e11f87243b3a386c8632606"
+  },
+  "generated_at_utc": "2026-07-14T11:08:48.692989+00:00",
+  "measurement_scope": "isolated_parser_worker_execution",
+  "network_egress": "NOT_MEASURED",
+  "profile": "cpu_safe",
+  "repeat_count": 3,
+  "repository": {
+    "commit": "77c8a62370712cca172392d64c055e30535266c0",
+    "dirty": false,
+    "dirty_entry_count": 0,
+    "dirty_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "results": [
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "e45e054dbd8323376704187752fd042250450204c8c51425b423b5667d894f30",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 5633.054944999458,
+      "latency_ms_median": 4398.56604599845,
+      "latency_ms_min": 4378.66827399921,
+      "latency_ms_per_page": 4398.56604599845,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 0.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "e45e054dbd8323376704187752fd042250450204c8c51425b423b5667d894f30",
+        "e45e054dbd8323376704187752fd042250450204c8c51425b423b5667d894f30",
+        "e45e054dbd8323376704187752fd042250450204c8c51425b423b5667d894f30"
+      ],
+      "rss_mb": 918.39453125,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "born_digital.pdf",
+      "text_char_count": 156
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "6c64500284968fe8fa48875d792a1a1680a34cacc4845fa280e27ba10236e3f1",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 4609.900266001205,
+      "latency_ms_median": 4497.689817999344,
+      "latency_ms_min": 4465.19835500294,
+      "latency_ms_per_page": 4497.689817999344,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 0.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "6c64500284968fe8fa48875d792a1a1680a34cacc4845fa280e27ba10236e3f1",
+        "6c64500284968fe8fa48875d792a1a1680a34cacc4845fa280e27ba10236e3f1",
+        "6c64500284968fe8fa48875d792a1a1680a34cacc4845fa280e27ba10236e3f1"
+      ],
+      "rss_mb": 918.11328125,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "table_heavy.pdf",
+      "text_char_count": 66
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "212d53380ee8abb5bdc1bccb422ce5c319a8d7f84dd6849b6f4310dd4afa49a4",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 4517.343741001241,
+      "latency_ms_median": 4443.899773999874,
+      "latency_ms_min": 4430.889928997203,
+      "latency_ms_per_page": 4443.899773999874,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 0.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "212d53380ee8abb5bdc1bccb422ce5c319a8d7f84dd6849b6f4310dd4afa49a4",
+        "212d53380ee8abb5bdc1bccb422ce5c319a8d7f84dd6849b6f4310dd4afa49a4",
+        "212d53380ee8abb5bdc1bccb422ce5c319a8d7f84dd6849b6f4310dd4afa49a4"
+      ],
+      "rss_mb": 918.45703125,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "formula_heavy.pdf",
+      "text_char_count": 76
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 3,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "ef7585f1b424b2599129f5cb25e9d4cde848a31b55abb8b7b7df156be0024025",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 5501.066318996891,
+      "latency_ms_median": 5454.64987199739,
+      "latency_ms_min": 5386.8916729989,
+      "latency_ms_per_page": 1818.21662399913,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 0.0,
+      "page_count": 3,
+      "repetition_output_hashes": [
+        "ef7585f1b424b2599129f5cb25e9d4cde848a31b55abb8b7b7df156be0024025",
+        "ef7585f1b424b2599129f5cb25e9d4cde848a31b55abb8b7b7df156be0024025",
+        "ef7585f1b424b2599129f5cb25e9d4cde848a31b55abb8b7b7df156be0024025"
+      ],
+      "rss_mb": 1131.390625,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "multipage_native.pdf",
+      "text_char_count": 190
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "6d2dabe7751de2b54e5cc4072f9ac0192ae3087dd85d0aaff29875e33f1b5a79",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 4500.682587000483,
+      "latency_ms_median": 4474.516614001914,
+      "latency_ms_min": 4457.963980999921,
+      "latency_ms_per_page": 4474.516614001914,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 0.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "6d2dabe7751de2b54e5cc4072f9ac0192ae3087dd85d0aaff29875e33f1b5a79",
+        "6d2dabe7751de2b54e5cc4072f9ac0192ae3087dd85d0aaff29875e33f1b5a79",
+        "6d2dabe7751de2b54e5cc4072f9ac0192ae3087dd85d0aaff29875e33f1b5a79"
+      ],
+      "rss_mb": 918.41796875,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "adversarial_text.pdf",
+      "text_char_count": 132
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "c1abb7dbe69e1823ab0d8cfe5fd379a3b2898818adcd526fedc2637c0375235a",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 5529.676949001441,
+      "latency_ms_median": 5516.455334000057,
+      "latency_ms_min": 5435.780281000916,
+      "latency_ms_per_page": 5516.455334000057,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 1.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "c1abb7dbe69e1823ab0d8cfe5fd379a3b2898818adcd526fedc2637c0375235a",
+        "c1abb7dbe69e1823ab0d8cfe5fd379a3b2898818adcd526fedc2637c0375235a",
+        "c1abb7dbe69e1823ab0d8cfe5fd379a3b2898818adcd526fedc2637c0375235a"
+      ],
+      "rss_mb": 1239.25,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "scanned.pdf",
+      "text_char_count": 39
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 2,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 2
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "dceb1288a9cddeac553143fbef2d640e1d3992ae1397b160342ce248b35c01fe",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 5719.963475999975,
+      "latency_ms_median": 5708.202830999653,
+      "latency_ms_min": 5618.416404002346,
+      "latency_ms_per_page": 5708.202830999653,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 1.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "dceb1288a9cddeac553143fbef2d640e1d3992ae1397b160342ce248b35c01fe",
+        "dceb1288a9cddeac553143fbef2d640e1d3992ae1397b160342ce248b35c01fe",
+        "dceb1288a9cddeac553143fbef2d640e1d3992ae1397b160342ce248b35c01fe"
+      ],
+      "rss_mb": 1304.359375,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "photo_skewed.pdf",
+      "text_char_count": 37
+    },
+    {
+      "content_validation": {
+        "matched_token_count": 4,
+        "minimum_pages": 1,
+        "passed": true,
+        "required_token_count": 4
+      },
+      "deterministic": true,
+      "deterministic_output_hash": "eaf5f2556c0b289bebc2e48e2b58f39ea116f6d61ab58b7db5a2f2f389aaf71a",
+      "error": null,
+      "framework": "docling",
+      "latency_ms_max": 5552.612630999647,
+      "latency_ms_median": 5488.441246001457,
+      "latency_ms_min": 5424.170854003023,
+      "latency_ms_per_page": 5488.441246001457,
+      "network_egress": "NOT_MEASURED",
+      "ocr_fallback_rate": 1.0,
+      "page_count": 1,
+      "repetition_output_hashes": [
+        "eaf5f2556c0b289bebc2e48e2b58f39ea116f6d61ab58b7db5a2f2f389aaf71a",
+        "eaf5f2556c0b289bebc2e48e2b58f39ea116f6d61ab58b7db5a2f2f389aaf71a",
+        "eaf5f2556c0b289bebc2e48e2b58f39ea116f6d61ab58b7db5a2f2f389aaf71a"
+      ],
+      "rss_mb": 1228.2109375,
+      "searchable_pdf_artifact_count": 0,
+      "source_filename": "multilingual.pdf",
+      "text_char_count": 32
+    }
+  ],
+  "runtime": {
+    "machine": "x86_64",
+    "packages": {
+      "docling": "2.112.0",
+      "docmind_ai_llm": "1.0.0",
+      "onnxruntime": "1.27.0",
+      "pypdfium2": "5.11.0",
+      "rapidocr": "3.9.1"
+    },
+    "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "python": "3.12.13 (main, Mar 20 2026, 00:33:26) [Clang 22.1.1 ]",
+    "python_implementation": "CPython"
+  },
+  "searchable_pdf_requested": false,
+  "summary": {
+    "content_validated_count": 8,
+    "deterministic_count": 8,
+    "error_count": 0,
+    "latency_ms_max": 5719.963475999975,
+    "latency_ms_median": 4976.169844998367,
+    "rss_mb_max": 1304.359375
+  }
+}

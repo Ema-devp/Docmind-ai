@@ -1,0 +1,151 @@
+---
+spec: SPEC-021
+title: Release readiness v1: ship plan, work packages, and quality gates
+version: 1.1.0
+date: 2026-07-11
+owners: ["ai-arch"]
+status: Implemented
+related_requirements:
+  - NFR-SEC-001: Default egress disabled; only local endpoints allowed unless explicitly configured.
+  - NFR-MAINT-002: Ruff/pyright pass (ruff enforces pylint-equivalent rules).
+  - NFR-MAINT-003: No placeholder APIs; docs/specs/RTM must match code.
+  - NFR-PORT-003: Docker/compose artifacts run and are reproducible from uv.lock.
+related_adrs:
+  - "ADR-023"
+  - "ADR-033"
+  - "ADR-035"
+  - "ADR-041"
+  - "ADR-042"
+  - "ADR-044"
+  - "ADR-045"
+  - "ADR-046"
+  - "ADR-047"
+  - "ADR-048"
+  - "ADR-049"
+  - "ADR-050"
+  - "ADR-051"
+  - "ADR-052"
+  - "ADR-053"
+  - "ADR-056"
+  - "ADR-058"
+---
+
+> **Historical v1 record:** WP16 shipped in v1. DocMind v2 removed the response cache because it did not share user/session memory identity or hard-purge ownership. ADR-035 and SPEC-038 are superseded.
+
+## Objective
+
+Define the **complete set of work packages** required to ship the first finished DocMind AI release with:
+
+- runnable local Streamlit app
+- runnable container artifacts
+- offline-first posture preserved
+- documentation + RTM consistency restored
+- no placeholder markers or NotImplemented placeholders left in production modules
+- advanced, opt-in capabilities shipped (semantic cache, analysis modes, backups) without violating local-first posture
+- cooperative deadline propagation without adding new remote surfaces
+
+This SPEC is the umbrella “release plan” and links to the individual ADR/SPEC/prompts for each package.
+
+## Non-goals
+
+- Introducing new RAG strategies beyond what is already implemented/spec’d
+- Changing the core model stack (Torch/vLLM/Transformers pins)
+- Adding cloud dependencies or enabling remote endpoints by default
+
+## Work packages
+
+Each work package MUST ship with:
+
+- ADR (decision + alternatives + ≥9.0 decision table)
+- SPEC (goals, design, security, tests, RTM updates)
+- Implementation Prompt (atomic executor prompt)
+
+| WP | Title | ADR | SPEC | Prompt |
+| --- | --- | --- | --- | --- |
+| 01 | Settings UI hardening + safe provider badge | ADR-041 | SPEC-022 | `docs/developers/prompts/implemented/prompt-022-settings-ui-hardening.md` |
+| 02 | Containerization hardening (Dockerfile + compose) | ADR-042 | SPEC-023 | `docs/developers/prompts/implemented/prompt-023-containerization-hardening.md` |
+| 03 | Chat persistence + hybrid agentic memory (LangGraph SQLite) | ADR-058 | SPEC-041 | `docs/developers/prompts/implemented/prompt-041-chat-persistence-langgraph-sqlite-hybrid-memory.md` |
+| 04 | Keyword tool: sparse-only Qdrant retriever | ADR-044 | SPEC-025 | `docs/developers/prompts/implemented/prompt-025-keyword-tool-sparse-only.md` |
+| 05 | Ingestion API cleanup (`src/processing/ingestion_api.py`) | ADR-045 | SPEC-026 | `docs/developers/prompts/implemented/prompt-026-ingestion-api-facade.md` |
+| 06 | Remove legacy `src/main.py` entrypoint | ADR-046 | SPEC-027 | `docs/developers/prompts/implemented/prompt-027-remove-legacy-main-entrypoint.md` |
+| 07 | Safe logging policy (remove PII redactor stub) | ADR-047 | SPEC-028 | `docs/developers/prompts/implemented/prompt-028-safe-logging-no-pii-redactor.md` |
+| 08 | Docs consistency pass (spec drift + ADR number backfill) | ADR-048 | SPEC-029 | `docs/developers/prompts/implemented/prompt-029-docs-consistency-pass.md` |
+| 09 | Multimodal helper cleanup (remove placeholder markers; clarify test-only helper) | ADR-049 | SPEC-030 | `docs/developers/prompts/implemented/prompt-030-multimodal-helper-cleanup.md` |
+| 10 | Config discipline: remove `os.getenv` sprawl; fix ADR placeholder marker; formalize hashing secret | ADR-050 | SPEC-031 | `docs/developers/prompts/implemented/prompt-031-config-discipline-env-bridges.md` |
+| 11 | Documents snapshot service boundary (extract rebuild/export) | ADR-051 | SPEC-032 | `docs/developers/prompts/implemented/prompt-032-documents-snapshot-service-boundary.md` |
+| 12 | Background ingestion & snapshot jobs (progress + cancel) | ADR-052 | SPEC-033 | `docs/developers/prompts/implemented/prompt-033-background-ingestion-jobs.md` |
+| 13 | Analytics page hardening (DuckDB + telemetry parsing) | ADR-053 | SPEC-034 | `docs/developers/prompts/implemented/prompt-034-analytics-page-hardening.md` |
+| 14 | Document analysis modes (auto/separate/combined) | ADR-023 | SPEC-036 | `docs/developers/prompts/implemented/prompt-036-document-analysis-modes.md` |
+| 15 | Local backup & retention (snapshots + cache + Qdrant) | ADR-033 | SPEC-037 | `docs/developers/prompts/implemented/prompt-037-local-backup-and-retention.md` |
+| 16 | Semantic response cache (Qdrant-backed, guardrailed) | ADR-035 | SPEC-038 | `docs/developers/prompts/implemented/prompt-038-semantic-cache-qdrant.md` |
+| 18 | Agent deadline propagation + router injection | ADR-056 | SPEC-040 | `docs/developers/prompts/implemented/prompt-040-agent-deadline-propagation-and-router-injection.md` |
+
+All ADR/SPEC/prompt files referenced above are stored under `docs/` in this repo and are part of this release plan.
+
+The proposed SQLite operational-metadata store in ADR-055 and SPEC-039 was
+superseded without implementation. Background jobs remain process-local, while
+durable chat state, snapshots, and the ingestion cache use their existing
+canonical stores.
+
+## Execution order and dependencies
+
+Recommended dependency order (minimizes churn):
+
+1. WP01 → fixes UI security sink and prevents invalid persisted config.
+2. WP10 → stabilizes config discipline (reduce `os.getenv` sprawl; unify settings).
+3. WP05/WP04 → stabilizes ingestion + retrieval tool surfaces used by agents/docs.
+4. WP18 → restores retrieval tool contract and aligns per-call timeouts to the supervisor decision budget.
+5. WP11 → moves snapshot rebuild/export into a testable service boundary (enables WP12).
+6. WP12 → adds process-local background ingestion UX on top of the stable service boundary.
+7. WP03 → ships chat persistence + time travel + hybrid memory UX (depends on stable settings/data_dir and stable supervisor wiring).
+8. WP14 → adds analysis modes on top of stable retrieval + chat UX.
+9. WP16 → adds semantic cache (optional; default-off; strict invalidation).
+10. WP15 → adds local backup/retention once data layout is stable (uses snapshots/cache dirs).
+11. WP06/WP07/WP13 → eliminates legacy entrypoints, strengthens logging safety, and hardens Analytics.
+12. WP09/WP08 → removes remaining work markers and aligns docs/RTM.
+13. WP02 (Docker/Compose) → can be done anytime, but should be validated before release.
+
+## Release quality gates (commands)
+
+All packages MUST pass these commands before being marked complete:
+
+```bash
+uv sync --frozen
+uv run ruff format --check .
+uv run ruff check .
+uv run pyright --threads 4
+uv run pytest tests/unit tests/integration -q --no-cov
+uv run pytest tests/unit tests/integration -q --cov=src --cov-branch --cov-report=term-missing --cov-report=html:htmlcov --cov-report=xml:coverage.xml --cov-report=json:coverage.json --cov-fail-under=80 --junitxml=junit.xml
+```
+
+> **v2 note:** SPEC-044 supersedes the v1 wheel gate. DocMind is now a
+> repository/container application and no longer publishes an unsupported
+> Python library artifact.
+
+Containerization packages MUST also pass:
+
+```bash
+docker build -t docmind:dev .
+docker compose config
+docker compose -f docker-compose.yml -f docker-compose.prod.yml config
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml config
+docker compose up --build -d
+docker compose exec ollama ollama pull qwen3:4b-instruct
+```
+
+## RTM updates
+
+Work packages that change behavior MUST update:
+
+- `docs/specs/traceability.md` with new/updated rows (Status = Planned → Implemented when done)
+- any referenced SPEC/ADR cross-links that currently drift (see WP08)
+- Consult the RTM format/schema in `docs/specs/traceability.md` (see “RTM Entry Format”).
+
+## Rollback plan
+
+Release rollback is config-first:
+
+- Settings UI changes: revert `.env` changes; relaunch Streamlit.
+- Chat persistence: delete `data/chat/` artifacts (local only).
+- Keyword tool: disable via env flag or remove tool registration.
+- Docker: revert to prior Dockerfile/compose; local run remains unaffected.
